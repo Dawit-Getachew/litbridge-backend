@@ -1,0 +1,92 @@
+---
+description: "External API integration: PubMed, OpenAlex, ClinicalTrials.gov, Europe PMC, Crossref, OpenCitations"
+globs: "repositories/**,services/**/fetch*"
+alwaysApply: false
+---
+
+# External API Reference
+
+## PubMed E-Utilities
+
+- Base: `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/`
+- **Always send** `api_key` and `email` params (10 req/s with key, 3 without)
+- Use `esearch.fcgi` for IDs, then `efetch.fcgi` for records
+- Set `usehistory=y` + `retmax=250` for paginated batches
+- Parse XML responses (PubMed returns XML by default)
+- Rate limit: **10/s with API key**
+
+```python
+params = {
+    "db": "pubmed", "term": query, "retmax": 250,
+    "usehistory": "y", "api_key": settings.NCBI_API_KEY,
+    "email": settings.CONTACT_EMAIL, "retmode": "xml",
+}
+```
+
+## OpenAlex
+
+- Base: `https://api.openalex.org/works`
+- **Polite pool**: Always send `mailto` param for faster, priority access
+- Pagination: Use **cursor-based** (`cursor=*` for first page, then returned cursor)
+- No field tags — strip `[tiab]`, `[MeSH]` from queries
+- Returns JSON natively
+- Rate limit: **10/s polite pool**
+
+```python
+params = {
+    "search": cleaned_query, "mailto": settings.CONTACT_EMAIL,
+    "per_page": 200, "cursor": cursor or "*",
+}
+```
+
+## ClinicalTrials.gov V2
+
+- Base: `https://clinicaltrials.gov/api/v2/studies`
+- Simplified query terms (no Boolean operators in V2, use `query.term`)
+- Returns JSON, paginate with `pageToken`
+- Rate limit: ~**5 req/s** (undocumented, be conservative)
+
+```python
+params = {
+    "query.term": simplified_terms,
+    "pageSize": 100, "pageToken": token or None,
+}
+```
+
+## Europe PMC
+
+- Base: `https://www.ebi.ac.uk/europepmc/webservices/rest/search`
+- Accepts PubMed-like Boolean syntax (near pass-through)
+- Set `format=json`, `resultType=core` for full metadata
+- Pagination: `cursorMark=*` then returned cursor
+- Full-text XML available for OA articles
+- Rate limit: **10/s**
+
+```python
+params = {
+    "query": query, "format": "json", "resultType": "core",
+    "pageSize": 100, "cursorMark": cursor or "*",
+}
+```
+
+## Crossref (Enrichment)
+
+- Base: `https://api.crossref.org/works/{doi}`
+- Send `mailto` for polite pool
+- Use for citation counts + JATS XML abstract parsing
+- Rate limit: **50/s polite pool**
+
+## OpenCitations (ID Bridging)
+
+- Base: `https://opencitations.net/meta/api/v1/metadata/{id}`
+- Use for DOI ↔ PMID bridging and citation counts
+- Free, no auth required
+
+## Shared Rules
+
+1. **One repository class per API** — e.g., `PubMedRepository`, `OpenAlexRepository`
+2. **Normalize to `RawRecord`** immediately after parsing API response
+3. **Never expose raw API response** to services — always normalize in the repo
+4. **Cache raw responses** in Redis (1h TTL) before normalization
+5. **Timeout: 30s per request** — fail fast, don't hold up the pipeline
+6. **Log every external call** with source, duration, result count

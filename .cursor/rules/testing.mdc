@@ -1,0 +1,76 @@
+---
+description: "Testing conventions: pytest-asyncio, fixtures, test structure"
+globs: "tests/**,**/test_*.py,**/conftest.py"
+alwaysApply: false
+---
+
+# Testing Standards
+
+## Structure
+
+```
+tests/
+├── conftest.py          # Shared fixtures: db, client, factories
+├── unit/
+│   ├── test_services.py
+│   └── test_dedup.py
+├── integration/
+│   ├── test_repositories.py
+│   └── test_api_endpoints.py
+└── ai/
+    └── test_graph.py
+```
+
+## Async Test Setup
+
+```python
+import pytest
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+@pytest.fixture
+async def db_session():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+
+@pytest.fixture
+async def client(db_session):
+    app.dependency_overrides[get_db] = lambda: db_session
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+```
+
+## Test Patterns
+
+```python
+@pytest.mark.asyncio
+async def test_search_publications_returns_results(client: AsyncClient):
+    response = await client.post("/api/v1/publications/search", json={"query": "cancer"})
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+
+@pytest.mark.asyncio
+async def test_dedup_removes_duplicate_dois():
+    pubs = [
+        {"doi": "10.1234/abc", "title": "Study A"},
+        {"doi": "10.1234/abc", "title": "Study A (duplicate)"},
+    ]
+    result = dedup_service.deduplicate(pubs)
+    assert len(result) == 1
+```
+
+## Rules
+
+1. **Name tests descriptively**: `test_{what}_{condition}_{expected}` pattern
+2. **One assertion focus per test** — test one behavior, multiple asserts OK if related
+3. **Use factories/fixtures** over hardcoded data — see conftest.py
+4. **Mock external APIs** — never hit real PubMed/OpenAlex in tests
+5. **Run with**: `uv run pytest tests/ -v --asyncio-mode=auto`
+6. Generate tests alongside new features — not as an afterthought

@@ -1,0 +1,70 @@
+---
+description: "Docker multi-stage build and deployment patterns with uv"
+globs: "Dockerfile,docker-compose*.yml,docker-compose*.yaml,.dockerignore"
+alwaysApply: false
+---
+
+# Docker & Deployment
+
+## Multi-Stage Dockerfile with uv
+
+```dockerfile
+FROM python:3.12-slim AS base
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+FROM base AS deps
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+FROM base AS runtime
+WORKDIR /app
+COPY --from=deps /app/.venv /app/.venv
+COPY src/ ./src/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+CMD ["gunicorn", "src.main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4"]
+```
+
+## Docker Compose
+
+```yaml
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: litbridge
+      POSTGRES_USER: litbridge
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litbridge"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+```
+
+## Rules
+
+1. **Always use `--frozen`** in Docker builds — ensures reproducible installs
+2. **Multi-stage** to keep runtime image small (no build tools)
+3. **Health checks** on all services
+4. **Never copy `.env` into images** — use env_file or secrets at runtime
+5. **.dockerignore**: Exclude `.venv/`, `__pycache__/`, `.git/`, `tests/`, `.cursor/`

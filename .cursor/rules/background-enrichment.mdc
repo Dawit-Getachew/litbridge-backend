@@ -1,0 +1,78 @@
+---
+description: "Fast path / slow path architecture: background enrichment pipeline"
+globs: "services/**/enrich*,services/**/background*,services/**/worker*,api/**/enrichment*"
+alwaysApply: false
+---
+
+# Background Enrichment Pipeline
+
+## Two-Path Architecture
+
+### Fast Path (blocks response — <2s target)
+1. Agent A: Translate query → source-specific syntax
+2. Agent B: Parallel federated fetch (all sources simultaneously)
+3. Agent C: In-memory deduplication → Golden Records
+4. **Return "First Paint"** to client — deduplicated list, basic metadata
+
+### Slow Path (background — does NOT block response)
+5. Agent D: Semantic enrichment (TLDR summaries, citation counts)
+6. Agent E: OA resolution cascade (OpenAlex → Unpaywall → Europe PMC)
+7. PRISMA counter updates
+8. KPI aggregation (OA rate, median year)
+
+## Implementation
+
+```python
+@router.post("/search", response_model=SearchResponse)
+async def initiate_search(
+    request: SearchRequest,
+    search_svc: SearchService = Depends(),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+):
+    # FAST PATH — blocks until first paint
+    search_id, records = await search_svc.federated_search_and_dedup(request)
+
+    # SLOW PATH — dispatched after response
+    background_tasks.add_task(
+        search_svc.enrich_batch, search_id, records
+    )
+    background_tasks.add_task(
+        search_svc.resolve_oa_batch, search_id, records
+    )
+
+    return SearchResponse(search_id=search_id)
+```
+
+## Enrichment Retrieval
+
+Client polls `GET /enrichment/{search_id}/{record_id}` to progressively
+load TLDR, citations, and OA status as background jobs complete.
+
+```python
+@router.get("/enrichment/{search_id}/{record_id}")
+async def get_enrichment(
+    search_id: str, record_id: str,
+    redis: Redis = Depends(get_redis),
+) -> EnrichmentResponse:
+    cached = await redis.get(f"litbridge:enrich:{record_id}")
+    if cached:
+        return EnrichmentResponse.model_validate_json(cached)
+    return EnrichmentResponse(id=record_id)  # empty = not yet enriched
+```
+
+## Scaling Strategy
+
+| Scale | Approach |
+|-------|----------|
+| MVP (<1K records/search) | `BackgroundTasks` (in-process) |
+| Growth (1K-10K records) | `asyncio.create_task` with semaphore |
+| Production (10K+) | ARQ + Redis job queue (separate workers) |
+
+## Rules
+
+1. **First paint < 2 seconds** — this is the primary UX target
+2. **Never block response** for enrichment or OA resolution
+3. **Idempotent enrichment** — re-running on same record produces same result
+4. **Store enrichment in Redis** — client fetches via polling endpoint
+5. **Batch external calls** — enrich 10-20 records per batch, not one-by-one
+6. **Graceful degradation** — if enrichment fails, record still works without TLDR/OA

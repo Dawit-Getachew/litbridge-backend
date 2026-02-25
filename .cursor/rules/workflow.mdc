@@ -1,0 +1,43 @@
+---
+description: "Cursor workflow patterns: how to use Cursor effectively with this project"
+alwaysApply: true
+---
+
+# Cursor Workflow for LitBridge
+
+## Prompting Strategy
+
+When starting a new task in Composer/Agent:
+- Reference rules: "Follow @project-overview and @python-backend"
+- Be specific: "Add PubMed fetcher in repositories/ following @database patterns"
+- Use Plan Mode (Shift+Tab) for multi-file changes
+
+## Planning Workflow
+
+1. **Plan Mode** for complex tasks — review before applying
+2. Save plans to `.cursor/plans/` for documentation
+3. If the agent goes off-track, revert and refine the plan
+
+## Context Management
+
+- Let the agent search — don't manually tag every file
+- Use `@Branch` to orient the agent to current work
+- Start new conversations for new logical units of work
+- Use `@Past Chats` to reference previous work without copy-pasting
+
+## Code Generation Checklist
+
+Before accepting generated code, verify:
+1. Layer separation respected (routes/services/repos)
+2. Type hints present on all signatures
+3. Pydantic models used for API boundaries
+4. Async patterns correct (no blocking I/O)
+5. Tests included
+6. No hardcoded values that should be in config
+
+## Useful Commands
+
+- "Scaffold a new endpoint for {resource}" — creates router + service + repo + schemas + test
+- "Write tests for {file}" — generates pytest-asyncio tests
+- "Review changes on this branch" — agent analyzes diff
+- "Create a migration for {change}" — generates Alembic migration

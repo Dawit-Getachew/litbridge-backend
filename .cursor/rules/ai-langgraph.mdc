@@ -1,0 +1,112 @@
+---
+description: "LangGraph multi-agent workflow: Agents A-E for federated search, dedup, enrichment, OA resolution"
+globs: "ai/**,**/graph*.py,**/agent*.py,**/workflow*.py,**/nodes/**"
+alwaysApply: false
+---
+
+# LangGraph Agent Workflow
+
+## State Definition
+
+```python
+from typing import TypedDict, Annotated
+from langgraph.graph.message import add_messages
+
+class ResearchState(TypedDict):
+    messages: Annotated[list, add_messages]
+    query: str                            # original user query
+    query_type: str                       # "free", "structured", "boolean"
+    pico: dict | None                     # PICO components if structured
+    translated_queries: dict[str, str]    # source → adapted query (Agent A output)
+    raw_records: list[dict]               # all fetched records (Agent B output)
+    fetch_errors: list[dict]              # partial failures from Agent B
+    deduped_records: list[dict]           # Golden Records (Agent C output)
+    dedup_stats: dict                     # PRISMA identification counts
+    enriched_records: list[dict]          # with TLDR + citations (Agent D output)
+    oa_results: dict[str, dict]           # record_id → OA status (Agent E output)
+    search_id: str                        # UUID for this search session
+```
+
+## Graph Structure
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+builder = StateGraph(ResearchState)
+
+# Fast path nodes (blocking — must complete for first paint)
+builder.add_node("translate", translate_query)      # Agent A
+builder.add_node("fetch", federated_fetch)          # Agent B
+builder.add_node("dedup", deduplicate_records)      # Agent C
+
+# Fast path edges
+builder.add_edge(START, "translate")
+builder.add_edge("translate", "fetch")
+builder.add_edge("fetch", "dedup")
+builder.add_edge("dedup", END)  # First paint returned here
+
+graph = builder.compile(checkpointer=MemorySaver())
+```
+
+Agents D and E run as **background tasks after first paint**, not as graph nodes.
+This keeps the graph fast (<2s) while enrichment happens asynchronously.
+
+## Node Functions
+
+Each node: async function, receives state, returns partial state update.
+
+```python
+async def translate_query(state: ResearchState) -> dict:
+    """Agent A: Translate query for each source."""
+    adapters = {
+        "pubmed": PubMedAdapter(),
+        "openalex": OpenAlexAdapter(),
+        "clinicaltrials": ClinicalTrialsAdapter(),
+        "europepmc": EuropePMCAdapter(),
+    }
+    translated = {src: adapter.translate(state["query"]) for src, adapter in adapters.items()}
+    return {"translated_queries": translated}
+
+async def federated_fetch(state: ResearchState) -> dict:
+    """Agent B: Parallel fetch from all sources."""
+    tasks = []
+    for source, query in state["translated_queries"].items():
+        tasks.append(repos[source].search(query))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    records, errors = [], []
+    for source, result in zip(state["translated_queries"].keys(), results):
+        if isinstance(result, Exception):
+            errors.append({"source": source, "error": str(result)})
+        else:
+            records.extend(result)
+    return {"raw_records": records, "fetch_errors": errors}
+
+async def deduplicate_records(state: ResearchState) -> dict:
+    """Agent C: Dedup into Golden Records."""
+    deduped, stats = dedup_service.deduplicate(state["raw_records"])
+    return {"deduped_records": deduped, "dedup_stats": stats}
+```
+
+## Streaming
+
+```python
+async def run_search(query: str, query_type: str) -> tuple[str, list]:
+    search_id = str(uuid4())
+    result = await graph.ainvoke({
+        "query": query,
+        "query_type": query_type,
+        "search_id": search_id,
+    })
+    return search_id, result["deduped_records"]
+```
+
+## Rules
+
+1. **Nodes are pure async functions** — no side effects beyond state updates
+2. **`return_exceptions=True`** in all `asyncio.gather` calls for partial failure
+3. **Graph = fast path only** — Agents D/E are BackgroundTasks, not graph nodes
+4. **State is immutable** — nodes return dicts, never mutate state directly
+5. **One graph per workflow** — `ai/graphs/research_graph.py`
+6. **Node functions in `ai/nodes/`** — one file per agent
+7. **MemorySaver for dev**, PostgreSQL checkpointer for production

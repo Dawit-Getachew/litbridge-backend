@@ -1,0 +1,115 @@
+---
+description: "Federated search: adapter pattern, parallel fetching, rate limiting, token buckets"
+globs: "services/**/search*,services/**/fetch*,services/**/orchestrat*,repositories/**/adapter*"
+alwaysApply: false
+---
+
+# Federated Search Architecture
+
+## Adapter Pattern (Agent A)
+
+Each external source gets an adapter that translates the canonical query.
+
+```python
+from abc import ABC, abstractmethod
+
+class QueryAdapter(ABC):
+    @abstractmethod
+    def translate(self, pubmed_query: str) -> str:
+        """Translate PubMed-style Boolean into source-specific syntax."""
+        ...
+
+class PubMedAdapter(QueryAdapter):
+    def translate(self, pubmed_query: str) -> str:
+        return pubmed_query  # pass-through
+
+class OpenAlexAdapter(QueryAdapter):
+    def translate(self, pubmed_query: str) -> str:
+        # Strip field tags [tiab], [MeSH], normalize phrases
+        cleaned = re.sub(r'\[[\w]+\]', '', pubmed_query)
+        return cleaned.strip()
+
+class ClinicalTrialsAdapter(QueryAdapter):
+    def translate(self, pubmed_query: str) -> str:
+        # Extract key terms, simplify Boolean for V2 API
+        terms = extract_key_terms(pubmed_query)
+        return " AND ".join(terms)
+
+class EuropePMCAdapter(QueryAdapter):
+    def translate(self, pubmed_query: str) -> str:
+        return pubmed_query  # near pass-through, EPMC accepts similar syntax
+```
+
+## Parallel Fetching (Agent B — Orchestrator)
+
+```python
+async def federated_fetch(
+    query: str, adapters: dict[str, QueryAdapter], repos: dict[str, BaseRepository]
+) -> list[RawRecord]:
+    tasks = []
+    for source, adapter in adapters.items():
+        translated = adapter.translate(query)
+        tasks.append(repos[source].search(translated))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    records = []
+    errors = []
+    for source, result in zip(adapters.keys(), results):
+        if isinstance(result, Exception):
+            logger.warning("source_fetch_failed", source=source, error=str(result))
+            errors.append({"source": source, "error": str(result)})
+        else:
+            records.extend(result)
+    return records, errors
+```
+
+## Rate Limiting (Token Bucket per Host)
+
+```python
+import asyncio, time
+
+class TokenBucket:
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.last_refill
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.last_refill = now
+            if self.tokens < 1:
+                wait = (1 - self.tokens) / self.rate
+                await asyncio.sleep(wait)
+                self.tokens = 0
+            else:
+                self.tokens -= 1
+
+# Per-host buckets
+RATE_LIMITS = {
+    "pubmed": TokenBucket(rate=10, capacity=10),    # 10/s with API key
+    "openalex": TokenBucket(rate=10, capacity=10),   # polite pool
+    "clinicaltrials": TokenBucket(rate=5, capacity=5),
+    "europepmc": TokenBucket(rate=10, capacity=10),
+}
+```
+
+## Retry with Backoff
+
+- Honor `Retry-After` headers (HTTP 429)
+- Exponential backoff: 1s, 2s, 4s, max 3 retries
+- Add jitter to avoid thundering herd
+- Log every retry with source + attempt number
+
+## Rules
+
+1. **Never block on a single source** — `return_exceptions=True` in `asyncio.gather`
+2. **Partial results are OK** — return what succeeded, log what failed
+3. **Normalize immediately** — each repo returns `list[RawRecord]`, not raw JSON
+4. **One `httpx.AsyncClient` per source** — shared via dependency injection, not per-request
+5. **Respect rate limits** — token bucket per host, honor 429 + Retry-After

@@ -1,0 +1,69 @@
+---
+description: "FastAPI router, endpoint, and middleware patterns for LitBridge"
+globs: "api/**/*.py"
+alwaysApply: false
+---
+
+# FastAPI Patterns
+
+## Router Structure
+
+```python
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+router = APIRouter(prefix="/v1/publications", tags=["Publications"])
+
+@router.post("/search", response_model=list[PublicationResponse])
+async def search_publications(
+    request: SearchRequest,
+    svc: IngestionService = Depends(get_ingestion_service),
+    db: AsyncSession = Depends(get_db),
+) -> list[PublicationResponse]:
+    return await svc.search_and_ingest(request, db)
+```
+
+## Key Principles
+
+1. **Thin routers**: Validate input/output, delegate to services, handle HTTP exceptions
+2. **Pydantic response_model**: Always set `response_model` for auto-docs and validation
+3. **Dependency injection**: Services, DB sessions, auth via `Depends()`
+4. **API versioning**: `/api/v1/` prefix from day one via `APIRouter(prefix=...)`
+5. **Tags**: Group endpoints logically for OpenAPI docs
+
+## Lifespan (not events)
+
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: init DB pool, Redis, LangGraph
+    async with get_engine().begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    # Shutdown: cleanup connections
+
+app = FastAPI(title="LitBridge API", lifespan=lifespan)
+```
+
+## Middleware
+
+- CORS: Configure for frontend origins
+- Request ID: Add `X-Request-ID` header for tracing
+- Structured logging: Log request method, path, duration, status
+
+## Pagination
+
+```python
+class PaginationParams(BaseModel):
+    skip: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=100)
+
+@router.get("/", response_model=PaginatedResponse[PublicationResponse])
+async def list_publications(
+    pagination: PaginationParams = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    ...
+```

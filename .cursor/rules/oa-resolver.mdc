@@ -1,0 +1,79 @@
+---
+description: "Agent E: Open Access resolver — OA cascade (OpenAlex → Unpaywall → Europe PMC)"
+globs: "services/**/oa*,services/**/open_access*,repositories/**/unpaywall*"
+alwaysApply: false
+---
+
+# Open Access Resolver (Agent E)
+
+## OA Cascade — First-Hit-Wins
+
+Resolve free full-text using a priority cascade. Stop at the first source that returns a valid link.
+
+```python
+OA_CASCADE = [
+    ("openalex", resolve_openalex_oa),     # Already in fetched data — free
+    ("unpaywall", resolve_unpaywall),       # Dedicated OA API — 100K/day limit
+    ("europepmc", resolve_europepmc_ft),    # Full-text XML for PMC articles
+]
+
+async def resolve_oa(record: UnifiedRecord, redis: Redis) -> OAResult:
+    cache_key = f"litbridge:oa:{record.doi or record.pmid}"
+    cached = await redis.get(cache_key)
+    if cached:
+        return OAResult.model_validate_json(cached)
+
+    for source_name, resolver in OA_CASCADE:
+        try:
+            result = await resolver(record)
+            if result and result.pdf_url:
+                result.resolved_via = source_name
+                await redis.setex(cache_key, 604800, result.model_dump_json())  # 7d
+                return result
+        except Exception:
+            logger.warning("oa_resolver_failed", source=source_name, doi=record.doi)
+            continue
+
+    # No OA found
+    closed = OAResult(oa_status="closed", pdf_url=None)
+    await redis.setex(cache_key, 86400, closed.model_dump_json())  # 1d for closed
+    return closed
+```
+
+## Source-Specific Resolvers
+
+### OpenAlex (Step 1 — cheapest)
+- Check `open_access.oa_url` field from already-fetched OpenAlex data
+- No additional API call needed if record came from OpenAlex
+- For records from other sources: `GET /works/doi:{doi}` → check `open_access`
+
+### Unpaywall (Step 2 — dedicated OA API)
+- `GET https://api.unpaywall.org/v2/{doi}?email={email}`
+- Returns `best_oa_location.url_for_pdf`
+- Rate limit: 100K calls/day — cache aggressively
+- Only works for DOIs (skip records without DOI)
+
+### Europe PMC (Step 3 — full-text XML)
+- `GET https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML`
+- Only for PMC articles with full-text available
+- Provides XML, not PDF — note this in `oa_format` field
+
+## OA Result Schema
+
+```python
+class OAResult(BaseModel):
+    oa_status: Literal["open", "closed", "unknown"] = "unknown"
+    pdf_url: str | None = None
+    oa_format: Literal["pdf", "xml", "html"] | None = None
+    resolved_via: str | None = None  # "openalex", "unpaywall", "europepmc"
+    license: str | None = None       # "cc-by", "cc-by-nc", etc.
+```
+
+## Rules
+
+1. **First-hit-wins** — stop cascade on first valid PDF URL
+2. **Cache OA status per DOI** — 7 days for open, 1 day for closed
+3. **Never scrape publisher sites** — only use legitimate OA APIs
+4. **Skip Unpaywall for non-DOI records** — it only works with DOIs
+5. **Track `resolved_via`** for analytics — know which source finds most OA
+6. **Background-only** — OA resolution runs in slow path, never blocks first paint

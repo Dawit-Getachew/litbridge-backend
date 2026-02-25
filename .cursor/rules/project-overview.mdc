@@ -1,0 +1,87 @@
+---
+description: "LitBridge Backend: Federated biomedical literature search platform — architecture, agents, tech stack"
+alwaysApply: true
+---
+
+# LitBridge Backend
+
+Unified biomedical search platform. Accepts PICO/Boolean queries, federates across PubMed, Europe PMC, OpenAlex, and ClinicalTrials.gov in parallel. Deduplicates into Golden Records, enriches with AI summaries and citation metrics, resolves Open Access full-text. Enforces PRISMA systematic review methodology.
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Framework | FastAPI (async-first) |
+| Package Manager | uv + pyproject.toml + uv.lock |
+| Agent Orchestration | LangGraph (stateful multi-agent graphs) |
+| Database | PostgreSQL + SQLAlchemy 2.0 async + Alembic |
+| Cache | Redis (24h page cache, OA memoization, rate limit counters) |
+| AI/LLM | OpenRouter (GPT-4o-mini / Claude) for TLDR fallback |
+| Semantic Data | Semantic Scholar API (TLDR, citations) |
+| OA Resolution | OpenAlex OA fields, Unpaywall API, Europe PMC full-text |
+| HTTP Client | httpx (async, shared clients per source) |
+| Logging | structlog (JSON structured) |
+| Testing | pytest + pytest-asyncio + httpx TestClient |
+| Deployment | Docker multi-stage with uv, Gunicorn + Uvicorn |
+
+## Multi-Agent Architecture (A through E)
+
+```
+User Query (PICO/Boolean)
+    │
+    ▼
+Agent A ─── Syntax Translator (Adapters)
+    │       Translates PubMed Boolean → source-specific dialects
+    ▼
+Agent B ─── Federated Fetcher (Orchestrator)
+    │       Parallel async calls to all 4 APIs, rate-limited
+    ▼
+Agent C ─── PRISMA Deduplication Engine
+    │       DOI/PMID hard match → fuzzy title soft match → Golden Records
+    ▼
+ ── FIRST PAINT (< 2s) ── return deduplicated results to client ──
+    │
+    ▼  (background, non-blocking)
+Agent D ─── Semantic Enrichment
+    │       Semantic Scholar TLDR + citations, LLM fallback
+    ▼
+Agent E ─── Open Access Resolver
+            OA cascade: OpenAlex → Unpaywall → Europe PMC
+```
+
+## Architecture Layers (Strict)
+
+```
+src/
+├── api/v1/          # Routers — thin, validate with Pydantic, HTTP concerns only
+├── services/        # Business logic — orchestration, agent coordination
+├── repositories/    # Data access — one per external API + one for DB
+├── models/          # SQLAlchemy/SQLModel ORM models
+├── schemas/         # Pydantic: UnifiedRecord, SearchRequest, PrismaCounts, etc.
+├── ai/              # LangGraph graphs, nodes, LLM client
+│   ├── graphs/      # Workflow graph definitions
+│   └── nodes/       # Individual node functions (fetch, dedup, enrich, resolve_oa)
+├── core/            # Config, security, deps, exceptions, middleware
+└── main.py          # FastAPI app + lifespan (Redis pool, DB engine, httpx clients)
+```
+
+## Naming Conventions
+
+- `snake_case` for variables, functions, modules, directories
+- `CamelCase` for Pydantic models, SQLModel classes, exceptions
+- Services: `{Domain}Service` — Repositories: `{Source}Repository`
+- Schemas: `{Entity}Create`, `{Entity}Response`, `{Entity}Update`
+- Adapters: `{Source}Adapter` — Nodes: `{verb}_{noun}` (e.g., `fetch_sources`)
+
+## Hard Rules
+
+1. No DB/HTTP calls in routers — delegate to services/repositories
+2. No business logic in repositories — only data access
+3. Async for all I/O — `httpx.AsyncClient`, `AsyncSession`, `redis.asyncio`
+4. Type hints everywhere — all signatures, all return types
+5. Pydantic for all API boundaries — never accept/return raw dicts
+6. structlog for logging — no `print()`, no stdlib logging
+7. Custom exceptions mapped to HTTPException only in routers
+8. First paint < 2 seconds — dedup is fast path, enrichment is background
+9. Partial failure is OK — if one source fails, return results from others
+10. Cache aggressively — Redis for API responses, OA status, enrichment

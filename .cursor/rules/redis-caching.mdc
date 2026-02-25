@@ -1,0 +1,77 @@
+---
+description: "Redis caching patterns: 24h page cache, memoization, key namespacing"
+globs: "**/*cache*,**/*redis*,core/deps*,services/**"
+alwaysApply: false
+---
+
+# Redis Caching Patterns
+
+## Async Client Setup
+
+```python
+from redis.asyncio import Redis
+
+async def get_redis() -> Redis:
+    return Redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        max_connections=20,
+    )
+```
+
+Inject via `Depends(get_redis)` — never use module-level globals.
+Initialize pool in lifespan startup, close on shutdown.
+
+## Key Namespacing
+
+All keys follow: `litbridge:{domain}:{identifier}`
+
+```python
+# Search results page cache (24h TTL)
+f"litbridge:search:{search_id}:page:{cursor}"
+
+# OA status memoization (7 day TTL — OA status rarely changes)
+f"litbridge:oa:{doi}"
+
+# Enrichment cache (24h TTL)
+f"litbridge:enrich:{record_id}"
+
+# Rate limit counters (per-host, 1s window)
+f"litbridge:ratelimit:{host}:{window_ts}"
+
+# PRISMA counts (1h TTL, invalidated on filter change)
+f"litbridge:prisma:{search_id}:{filter_hash}"
+```
+
+## Caching Strategy
+
+| Data | TTL | Strategy | Reason |
+|------|-----|----------|--------|
+| Search result pages | 24h | Write-through on first fetch | Expensive federated queries |
+| OA status per DOI | 7d | Lazy populate on first lookup | Rarely changes, expensive cascade |
+| Enrichment (TLDR, citations) | 24h | Background write after enrichment | Async pipeline result |
+| External API responses | 1h | Cache raw response before normalize | Reduce upstream load |
+| PRISMA counts | 1h | Invalidate on filter change | Derived from cached results |
+
+## Patterns
+
+```python
+async def cached_or_fetch(
+    redis: Redis, key: str, ttl: int, fetch_fn
+) -> dict:
+    cached = await redis.get(key)
+    if cached:
+        return json.loads(cached)
+    result = await fetch_fn()
+    await redis.setex(key, ttl, json.dumps(result))
+    return result
+```
+
+## Rules
+
+1. **Always set TTL** — no immortal keys; 24h default, 7d max
+2. **JSON serialize** with `orjson` for speed — never pickle
+3. **Graceful degradation** — if Redis is down, skip cache, don't crash
+4. **No sensitive data** in cache — no auth tokens, no user passwords
+5. **Use pipelines** for batch operations (multi-get enrichment data)
+6. **Hash filter params** for composite cache keys to avoid key explosion

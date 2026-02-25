@@ -1,0 +1,60 @@
+---
+description: "Meta-rule: generates new .cursor/rules/*.mdc files following project conventions"
+alwaysApply: false
+---
+
+# Rule Generator
+
+When asked to create a new Cursor rule, follow this process:
+
+## 1. Determine Rule Properties
+
+- **Scope**: Always apply, auto-attach (glob), agent-decided, or manual?
+- **Glob patterns**: Which files should trigger this rule?
+- **Description**: One-line summary for the frontmatter (used by agent to decide relevance)
+
+## 2. File Format
+
+Create `.mdc` files in `.cursor/rules/` with this structure:
+
+```markdown
+---
+description: "Concise description of what this rule enforces"
+globs: "pattern/here"       # omit for always-apply or agent-decided
+alwaysApply: false           # true only for universal project rules
+---
+
+# Rule Title
+
+Brief context paragraph.
+
+## Patterns
+
+Show GOOD vs BAD examples with code blocks.
+
+## Rules
+
+Numbered list of concrete, actionable rules.
+```
+
+## 3. Quality Checklist
+
+- [ ] Under 500 lines (ideally under 100)
+- [ ] One concern per rule file
+- [ ] Concrete code examples (not abstract advice)
+- [ ] References existing project files with `@filename` where applicable
+- [ ] Frontmatter description is specific enough for agent to decide relevance
+- [ ] Glob patterns are accurate and not too broad
+- [ ] snake-case filename: `{domain}-{concern}.mdc`
+
+## 4. Naming Convention
+
+- `{domain}.mdc` for broad domain rules (e.g., `database.mdc`)
+- `{domain}-{specific}.mdc` for focused rules (e.g., `api-pagination.mdc`)
+- Avoid generic names like `rules.mdc` or `standards.mdc`
+
+## 5. When to Create vs. Update
+
+- **Create new**: Genuinely new domain or concern not covered
+- **Update existing**: Adding patterns to an existing domain rule
+- Check existing rules in `.cursor/rules/` before creating duplicates

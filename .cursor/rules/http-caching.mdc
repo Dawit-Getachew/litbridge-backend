@@ -1,0 +1,82 @@
+---
+description: "HTTP caching layer: ETag, 304 Not Modified, Cache-Control headers"
+globs: "api/**,core/middleware*"
+alwaysApply: false
+---
+
+# HTTP Caching Layer
+
+## Purpose
+
+Sits in front of the API. Returns `304 Not Modified` when client already has current data.
+Saves bandwidth and compute — 500 bytes header vs 50KB+ payload.
+
+## ETag Implementation
+
+```python
+import hashlib
+from fastapi import Request, Response
+
+def generate_etag(data: bytes) -> str:
+    return f'W/"{hashlib.md5(data).hexdigest()}"'
+
+@router.get("/results/{search_id}")
+async def get_results(
+    search_id: str,
+    request: Request,
+    cursor: str | None = None,
+    svc: SearchService = Depends(),
+):
+    results = await svc.get_results_page(search_id, cursor)
+    body = results.model_dump_json().encode()
+    etag = generate_etag(body)
+
+    # Check If-None-Match header
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match == etag:
+        return Response(status_code=304)
+
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "ETag": etag,
+            "Cache-Control": "private, max-age=60, stale-while-revalidate=300",
+        },
+    )
+```
+
+## Cache-Control Strategy
+
+| Endpoint | Cache-Control | Reason |
+|----------|--------------|--------|
+| `/results/{id}` | `private, max-age=60, swr=300` | Results stable after dedup |
+| `/enrichment/{id}/{rid}` | `private, max-age=300, swr=600` | TLDR/OA status updates slowly |
+| `/prisma/{id}` | `private, max-age=30` | Counts change with filters |
+| `/search` (POST) | `no-store` | Always creates new search |
+
+- `private` — results are user-specific, no CDN caching
+- `stale-while-revalidate` (swr) — serve stale while refreshing in background
+- `max-age` — seconds before browser must revalidate
+
+## Middleware Approach
+
+For consistent headers across all GET endpoints:
+
+```python
+@app.middleware("http")
+async def cache_control_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.method == "GET" and response.status_code == 200:
+        if "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "private, max-age=60"
+    return response
+```
+
+## Rules
+
+1. **Weak ETags** (`W/"..."`) — semantic equivalence is sufficient for JSON APIs
+2. **POST endpoints never cached** — always `no-store`
+3. **Include ETag on all paginated GET responses**
+4. **stale-while-revalidate** for enrichment — data arrives progressively
+5. **Never cache error responses** — only 200 OK

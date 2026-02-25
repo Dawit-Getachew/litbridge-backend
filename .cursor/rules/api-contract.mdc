@@ -1,0 +1,113 @@
+---
+description: "API contract: UnifiedRecord schema, cursor pagination, PRISMA counts, search/enrichment endpoints"
+globs: "schemas/**,api/**"
+alwaysApply: false
+---
+
+# API Contract
+
+## Core Schemas
+
+### UnifiedRecord (the Golden Record)
+
+```python
+class UnifiedRecord(BaseModel):
+    id: str
+    title: str
+    authors: list[str]
+    journal: str | None = None
+    year: int | None = None
+    doi: str | None = None
+    pmid: str | None = None
+    source: SourceType              # primary source
+    sources_found_in: list[SourceType] = []  # provenance
+    tldr: str | None = None
+    citation_count: int | None = None
+    oa_status: OAStatus = "unknown"
+    pdf_url: str | None = None
+    abstract: str | None = None
+    duplicate_cluster_id: str | None = None
+    prisma_stage: str | None = None
+
+class SourceType(str, Enum):
+    PUBMED = "pubmed"
+    EUROPEPMC = "europepmc"
+    OPENALEX = "openalex"
+    CLINICALTRIALS = "clinicaltrials"
+
+class OAStatus(str, Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    UNKNOWN = "unknown"
+```
+
+### Search Request / Response
+
+```python
+class SearchRequest(BaseModel):
+    query: str
+    query_type: Literal["free", "structured", "boolean"] = "free"
+    pico: PICOInput | None = None
+
+class PICOInput(BaseModel):
+    population: str | None = None
+    intervention: str | None = None
+    comparison: str | None = None
+    outcome: str | None = None
+
+class SearchResponse(BaseModel):
+    search_id: str
+
+class PaginatedResults(BaseModel):
+    search_id: str
+    total_count: int
+    records: list[UnifiedRecord]
+    next_cursor: str | None = None  # null = last page
+```
+
+### Enrichment Response
+
+```python
+class EnrichmentResponse(BaseModel):
+    id: str
+    tldr: str | None = None
+    citation_count: int | None = None
+    oa_status: OAStatus | None = None
+    pdf_url: str | None = None
+```
+
+### PRISMA Counts
+
+```python
+class PrismaCounts(BaseModel):
+    identified: int
+    after_deduplication: int
+    screened: int
+    excluded: int
+    oa_retrieved: int
+```
+
+## Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/search` | Initiate federated search → returns `search_id` |
+| GET | `/results/{search_id}` | First page of results |
+| GET | `/results/{search_id}?cursor={c}` | Next page (cursor pagination) |
+| GET | `/enrichment/{search_id}/{record_id}` | TLDR, citations, OA for one record |
+| GET | `/prisma/{search_id}` | PRISMA counts (with filter query params) |
+
+## Cursor Pagination
+
+- First request: no `cursor` param → returns first page + `next_cursor`
+- Subsequent: pass `next_cursor` as `cursor` param
+- `next_cursor: null` means no more pages
+- Never use offset-based pagination — cursor is O(1) at any scale
+
+## Rules
+
+1. **All response models use `snake_case`** — frontend Zod schemas handle camelCase conversion
+2. **`search_id` is opaque** — UUID v4, never expose internal DB IDs
+3. **Cursor is opaque** — base64-encoded, client must not parse it
+4. **Partial enrichment OK** — return only fields that are available, omit the rest
+5. **PRISMA counts respect filters** — yearFrom, yearTo, sources, openAccessOnly

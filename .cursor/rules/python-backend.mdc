@@ -1,0 +1,69 @@
+---
+description: "Python coding standards for the LitBridge backend"
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python Standards
+
+## Style
+
+- Python 3.12+ features: `type` aliases, `X | None` over `Optional[X]`, f-strings
+- Use `def` for pure/sync functions, `async def` for I/O-bound
+- Guard clauses + early returns over nested if/else
+- One class per file when the class is substantial (>50 lines)
+- Imports: stdlib → third-party → local, separated by blank lines
+
+## Type Hints
+
+```python
+# Always annotate signatures and returns
+async def get_publication(pub_id: int, db: AsyncSession) -> Publication | None:
+    ...
+
+# Use Pydantic for complex structures, not TypedDict/dict
+class SearchRequest(BaseModel):
+    query: str
+    sources: list[str] = ["pubmed", "openalex"]
+    max_results: int = Field(default=50, ge=1, le=500)
+```
+
+## Error Handling
+
+```python
+# Domain exceptions in core/exceptions.py
+class PublicationNotFoundError(Exception):
+    def __init__(self, pub_id: int):
+        self.pub_id = pub_id
+        super().__init__(f"Publication {pub_id} not found")
+
+# Map to HTTP in routers only
+@router.get("/{pub_id}")
+async def get_publication(pub_id: int, svc: PubService = Depends()):
+    try:
+        return await svc.get(pub_id)
+    except PublicationNotFoundError:
+        raise HTTPException(status_code=404, detail="Publication not found")
+```
+
+## Async Patterns
+
+- Use `httpx.AsyncClient` as a context manager or via dependency injection
+- Use `asyncio.gather()` for parallel I/O (e.g., fetching from multiple sources)
+- Never use `time.sleep()` — use `asyncio.sleep()` if needed
+- CPU-bound work: `run_in_threadpool()` from FastAPI
+
+## Logging
+
+```python
+import structlog
+logger = structlog.get_logger()
+
+# Structured key-value pairs, not formatted strings
+logger.info("publication_fetched", source="pubmed", count=42, query=query)
+```
+
+## Dependencies
+
+- Add packages with `uv add <package>` — never edit pyproject.toml manually for deps
+- Pin versions in pyproject.toml, lock with `uv lock`

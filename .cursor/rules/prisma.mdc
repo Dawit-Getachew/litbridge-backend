@@ -1,0 +1,94 @@
+---
+description: "PRISMA systematic review methodology: counters, flow diagram, screening stages"
+globs: "services/**/prisma*,schemas/**/prisma*,api/**/prisma*"
+alwaysApply: false
+---
+
+# PRISMA Methodology
+
+## PRISMA 2020 Flow Stages
+
+LitBridge tracks the standard PRISMA 2020 flow for systematic reviews:
+
+```
+Identification → Screening → Eligibility → Included
+```
+
+### Counter Definitions
+
+```python
+class PrismaCounts(BaseModel):
+    identified: int          # Total records from all sources (before dedup)
+    after_deduplication: int # Records remaining after Agent C dedup
+    screened: int            # Records the user has viewed/assessed
+    excluded: int            # Records user marked as irrelevant
+    oa_retrieved: int        # Records where OA full-text was found
+
+class PrismaSourceBreakdown(BaseModel):
+    pubmed: int = 0
+    europepmc: int = 0
+    openalex: int = 0
+    clinicaltrials: int = 0
+```
+
+## Counter Update Logic
+
+```python
+async def compute_prisma_counts(
+    search_id: str,
+    filters: PrismaFilters,
+    redis: Redis,
+    db: AsyncSession,
+) -> PrismaCounts:
+    # Base counts from search metadata
+    meta = await get_search_metadata(search_id, redis)
+
+    # Apply filters (year range, sources, OA-only)
+    filtered = await apply_filters(search_id, filters, db)
+
+    return PrismaCounts(
+        identified=meta.total_raw_count,
+        after_deduplication=meta.deduped_count,
+        screened=filtered.viewed_count,
+        excluded=filtered.excluded_count,
+        oa_retrieved=filtered.oa_count,
+    )
+```
+
+## Filters That Affect PRISMA Counts
+
+```python
+class PrismaFilters(BaseModel):
+    year_from: int | None = None
+    year_to: int | None = None
+    sources: list[SourceType] | None = None
+    open_access_only: bool = False
+```
+
+When filters change, PRISMA counts must be recomputed for the filtered subset.
+Cache with `litbridge:prisma:{search_id}:{filter_hash}` key.
+
+## PRISMA Flow Diagram Data
+
+Provide structured data for the frontend to render the flow diagram:
+
+```python
+class PrismaFlowData(BaseModel):
+    identification: PrismaSourceBreakdown
+    total_identified: int
+    duplicates_removed: int
+    records_screened: int
+    records_excluded: int
+    full_text_assessed: int
+    full_text_excluded: int
+    studies_included: int
+```
+
+## Rules
+
+1. **Counters are always derived** — computed from actual data, never manually set
+2. **Source breakdown required** — track how many records came from each API
+3. **Filters must be respected** — PRISMA counts reflect the current filter state
+4. **Persist screening decisions** in PostgreSQL — user marks records as included/excluded
+5. **Log PRISMA state transitions** — for reproducibility and audit trails
+6. **Export support** — PRISMA data must be exportable as CSV/JSON

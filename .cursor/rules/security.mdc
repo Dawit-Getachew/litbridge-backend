@@ -1,0 +1,50 @@
+---
+description: "Security standards: auth, secrets, input validation, CORS"
+globs: "core/security*,core/config*,api/**,**/auth*"
+alwaysApply: false
+---
+
+# Security Standards
+
+## Configuration
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    DATABASE_URL: str
+    REDIS_URL: str = "redis://localhost:6379"
+    SECRET_KEY: str
+    OPENROUTER_API_KEY: str
+    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+```
+
+## Auth Pattern
+
+- Use OAuth2 with JWT or API key auth via `Depends()`
+- Never store plaintext passwords — use bcrypt/argon2
+- Token validation in a reusable dependency
+
+```python
+from fastapi.security import OAuth2PasswordBearer
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    payload = verify_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return await user_repo.get(payload["sub"])
+```
+
+## Hard Rules
+
+1. **All secrets in `.env`** — never hardcode API keys, DB passwords, or tokens
+2. **`.env` in .gitignore** — always; provide `.env.example` with dummy values
+3. **Validate all input** with Pydantic — never trust raw request data
+4. **Rate limiting** on public endpoints (use slowapi or custom middleware)
+5. **CORS** configured explicitly — no wildcard `*` in production
+6. **SQL injection**: Use parameterized queries (SQLAlchemy handles this)
+7. **Dependency audit**: Run `uv pip audit` periodically
+8. **No secrets in logs** — structlog processors should redact sensitive fields

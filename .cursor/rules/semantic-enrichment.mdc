@@ -1,0 +1,110 @@
+---
+description: "Agent D: Semantic enrichment — TLDR summaries, citation counts, relevance ranking"
+globs: "services/**/enrich*,services/**/semantic*,ai/**/summariz*,repositories/**/semantic*"
+alwaysApply: false
+---
+
+# Semantic Enrichment (Agent D)
+
+## TLDR Summary Generation
+
+### Strategy: Semantic Scholar first, LLM fallback
+
+```python
+async def generate_tldr(record: UnifiedRecord) -> str | None:
+    # 1. Try Semantic Scholar TLDR (free, pre-computed)
+    if record.doi or record.pmid:
+        tldr = await semantic_scholar_repo.get_tldr(record.doi or record.pmid)
+        if tldr:
+            return tldr
+
+    # 2. Fallback: Generate with LLM via OpenRouter
+    if record.abstract:
+        return await llm_client.summarize_abstract(record.abstract)
+
+    return None
+```
+
+### Semantic Scholar API
+
+```python
+class SemanticScholarRepository:
+    BASE = "https://api.semanticscholar.org/graph/v1"
+
+    async def get_paper(self, identifier: str) -> dict | None:
+        """Fetch paper with TLDR and citation count."""
+        url = f"{self.BASE}/paper/{identifier}"
+        params = {"fields": "tldr,citationCount,influentialCitationCount,year"}
+        resp = await self.client.get(url, params=params)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+
+    async def get_tldr(self, identifier: str) -> str | None:
+        paper = await self.get_paper(identifier)
+        if paper and paper.get("tldr"):
+            return paper["tldr"]["text"]
+        return None
+```
+
+- Rate limit: **100 req/s** without API key, 1 req/s for `/recommendations`
+- Identifiers: DOI, PMID, Semantic Scholar ID, ArXiv ID
+- Fields: `tldr`, `citationCount`, `influentialCitationCount`, `abstract`
+
+### LLM Fallback (via OpenRouter)
+
+```python
+class LLMClient:
+    async def summarize_abstract(self, abstract: str) -> str:
+        response = await self.client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json={
+                "model": settings.SUMMARY_MODEL,  # e.g., "openai/gpt-4o-mini"
+                "messages": [
+                    {"role": "system", "content": TLDR_SYSTEM_PROMPT},
+                    {"role": "user", "content": abstract},
+                ],
+                "max_tokens": 150,
+            },
+            headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}"},
+        )
+        return response.json()["choices"][0]["message"]["content"]
+
+TLDR_SYSTEM_PROMPT = (
+    "Summarize this biomedical abstract in exactly one sentence. "
+    "Be specific about findings. Include key numbers/statistics. "
+    "Use plain language accessible to researchers."
+)
+```
+
+## Citation Metrics
+
+- Fetch from Semantic Scholar (`citationCount`, `influentialCitationCount`)
+- Fallback: Crossref (`is-referenced-by-count` field)
+- Cache citation counts with 24h TTL (they change slowly)
+
+## Relevance Ranking
+
+Sort enriched records by composite score:
+
+```python
+def relevance_score(record: UnifiedRecord) -> float:
+    score = 0.0
+    if record.citation_count:
+        score += min(record.citation_count / 100, 5.0)  # cap at 5
+    if record.year:
+        recency = max(0, 2026 - record.year)
+        score += max(0, 3.0 - recency * 0.3)  # newer = higher
+    if record.oa_status == "open":
+        score += 1.0  # boost open access
+    return score
+```
+
+## Rules
+
+1. **Semantic Scholar first** — free, pre-computed TLDRs, no LLM cost
+2. **LLM only when no TLDR exists** — abstract must be available
+3. **One sentence max** for TLDRs — no multi-paragraph summaries
+4. **Batch enrichment** — enrich 10-20 records per API call batch
+5. **Cache all enrichment** in Redis — 24h TTL per record
+6. **Never block first paint** — enrichment is always slow path
