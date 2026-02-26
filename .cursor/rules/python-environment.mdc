@@ -1,0 +1,61 @@
+---
+description: "Python environment: always use .venv, uv for packages, Windows activation commands"
+alwaysApply: true
+---
+
+# Python Environment
+
+## Virtual Environment
+
+- Project uses `.venv` in the repo root (created by `uv venv`)
+- **Always prefix commands with `uv run`** — this auto-uses the .venv without manual activation
+- If manual activation is needed on Windows:
+  - PowerShell: `.venv\Scripts\Activate.ps1`
+  - CMD: `.venv\Scripts\activate.bat`
+  - Git Bash: `source .venv/Scripts/activate`
+
+## Package Manager: uv (not pip)
+
+```bash
+# Install a package
+uv add httpx
+
+# Install a dev dependency
+uv add --dev pytest
+
+# Remove a package
+uv remove httpx
+
+# Sync all dependencies from lockfile
+uv sync
+
+# Run any Python command through the venv
+uv run python script.py
+uv run pytest tests/ -v
+uv run uvicorn src.main:app --reload
+uv run alembic upgrade head
+```
+
+## Hard Rules
+
+1. **Never use `pip install`** — always `uv add`
+2. **Never use bare `python`** — always `uv run python`
+3. **Never use bare `pytest`** — always `uv run pytest`
+4. **Never edit pyproject.toml deps manually** — use `uv add` / `uv remove`
+5. **Never commit `.venv/`** — it must be in `.gitignore`
+6. **Lock after changes**: `uv lock` (happens automatically with `uv add`)
+
+## Environment Setup (from scratch)
+
+```bash
+uv venv                  # Creates .venv in project root
+uv sync                  # Installs all deps from pyproject.toml + uv.lock
+uv run uvicorn src.main:app --reload  # Start dev server
+```
+
+## OS: Windows + WSL
+
+- **Python/uv commands**: Run in **Windows PowerShell** (default terminal)
+- **Docker commands**: Run in **Ubuntu WSL** — prefix with `wsl` or open a WSL terminal
+- Use backslashes in Windows file paths, forward slashes in WSL
+- Docker Desktop uses WSL2 backend — all containers run inside WSL

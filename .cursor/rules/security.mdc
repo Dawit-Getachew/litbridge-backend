@@ -10,15 +10,48 @@ alwaysApply: false
 
 ```python
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
 
 class Settings(BaseSettings):
+    # Core
     DATABASE_URL: str
-    REDIS_URL: str = "redis://localhost:6379"
+    REDIS_URL: str = "redis://localhost:6379/0"
     SECRET_KEY: str
-    OPENROUTER_API_KEY: str
+    CONTACT_EMAIL: str
+
+    # LLM Provider — switch between "openai" and "openrouter"
+    LLM_PROVIDER: Literal["openai", "openrouter"] = "openai"
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
+
+    # External APIs
+    NCBI_API_KEY: str
+    SEMANTIC_SCHOLAR_API_KEY: str = ""
+
+    # Security
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def llm_api_key(self) -> str:
+        if self.LLM_PROVIDER == "openrouter":
+            return self.OPENROUTER_API_KEY
+        return self.OPENAI_API_KEY
+
+    @property
+    def llm_base_url(self) -> str:
+        if self.LLM_PROVIDER == "openrouter":
+            return "https://openrouter.ai/api/v1"
+        return "https://api.openai.com/v1"
+
+    @property
+    def llm_model(self) -> str:
+        if self.LLM_PROVIDER == "openrouter":
+            return self.OPENROUTER_MODEL
+        return self.OPENAI_MODEL
 ```
 
 ## Auth Pattern

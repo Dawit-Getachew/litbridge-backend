@@ -51,30 +51,55 @@ class SemanticScholarRepository:
 - Identifiers: DOI, PMID, Semantic Scholar ID, ArXiv ID
 - Fields: `tldr`, `citationCount`, `influentialCitationCount`, `abstract`
 
-### LLM Fallback (via OpenRouter)
+### LLM Fallback (OpenAI or OpenRouter — switchable)
+
+Both OpenAI and OpenRouter use the same chat completions format.
+Switch by changing `LLM_PROVIDER` in `.env` — no code changes needed.
 
 ```python
 class LLMClient:
+    """Unified LLM client. Works with OpenAI or OpenRouter via base_url swap."""
+
+    def __init__(self, settings: Settings):
+        self.base_url = settings.llm_base_url
+        self.api_key = settings.llm_api_key
+        self.model = settings.llm_model
+
     async def summarize_abstract(self, abstract: str) -> str:
-        response = await self.client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            json={
-                "model": settings.SUMMARY_MODEL,  # e.g., "openai/gpt-4o-mini"
-                "messages": [
-                    {"role": "system", "content": TLDR_SYSTEM_PROMPT},
-                    {"role": "user", "content": abstract},
-                ],
-                "max_tokens": 150,
-            },
-            headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}"},
-        )
-        return response.json()["choices"][0]["message"]["content"]
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": TLDR_SYSTEM_PROMPT},
+                        {"role": "user", "content": abstract},
+                    ],
+                    "max_tokens": 150,
+                },
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
 
 TLDR_SYSTEM_PROMPT = (
     "Summarize this biomedical abstract in exactly one sentence. "
     "Be specific about findings. Include key numbers/statistics. "
     "Use plain language accessible to researchers."
 )
+```
+
+### Switching Providers
+
+```bash
+# In .env — just change these two lines:
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_key_here
+```
+
+No code changes needed. The `LLMClient` reads `settings.llm_base_url` and
+`settings.llm_api_key` which resolve based on `LLM_PROVIDER`.
 ```
 
 ## Citation Metrics

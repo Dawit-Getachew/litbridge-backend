@@ -31,7 +31,79 @@ EXPOSE 8000
 CMD ["gunicorn", "src.main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4"]
 ```
 
-## Docker Compose
+## Docker Compose (Dev Environment)
+
+PostgreSQL and Redis run in Docker. The FastAPI app runs locally with `uv run`.
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-litbridge}
+      POSTGRES_USER: ${POSTGRES_USER:-litbridge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-litbridge_dev_2026}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litbridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+```
+
+## CRITICAL: Docker Runs in WSL (Ubuntu)
+
+All Docker commands MUST be executed inside **Ubuntu WSL**, not in Windows PowerShell.
+
+```bash
+# Open WSL terminal first
+wsl
+
+# Then run Docker commands inside WSL:
+docker compose up -d
+docker compose down
+docker compose logs
+docker compose ps
+```
+
+When running Docker commands from Cursor's terminal, always prefix with `wsl` or
+run them in a WSL terminal. Docker Desktop uses WSL2 backend on Windows.
+
+## Dev Workflow
+
+```bash
+# 1. Start PostgreSQL + Redis (in WSL / Ubuntu terminal)
+wsl docker compose up -d
+
+# 2. Run the FastAPI app locally (in PowerShell — normal Windows terminal)
+uv run uvicorn src.main:app --reload --port 8000
+
+# 3. Stop services (in WSL)
+wsl docker compose down
+
+# 4. Reset database — delete volume (in WSL)
+wsl docker compose down -v
+
+# 5. Check service status (in WSL)
+wsl docker compose ps
+wsl docker compose logs db
+wsl docker compose logs redis
+```
+
+## Docker Compose (Full Production)
 
 ```yaml
 services:
@@ -41,21 +113,22 @@ services:
     env_file: .env
     depends_on:
       db: { condition: service_healthy }
-      redis: { condition: service_started }
+      redis: { condition: service_healthy }
 
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: litbridge
-      POSTGRES_USER: litbridge
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U litbridge"]
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
 
 volumes:
   pgdata:
@@ -63,8 +136,11 @@ volumes:
 
 ## Rules
 
-1. **Always use `--frozen`** in Docker builds — ensures reproducible installs
-2. **Multi-stage** to keep runtime image small (no build tools)
-3. **Health checks** on all services
-4. **Never copy `.env` into images** — use env_file or secrets at runtime
-5. **.dockerignore**: Exclude `.venv/`, `__pycache__/`, `.git/`, `tests/`, `.cursor/`
+1. **All Docker commands run in WSL (Ubuntu)** — never run `docker` in Windows PowerShell
+2. **Always use `--frozen`** in Docker builds — ensures reproducible installs
+3. **Multi-stage** to keep runtime image small (no build tools)
+4. **Health checks** on all services
+5. **Never copy `.env` into images** — use env_file or secrets at runtime
+6. **.dockerignore**: Exclude `.venv/`, `__pycache__/`, `.git/`, `tests/`, `.cursor/`
+7. **Dev mode**: PostgreSQL + Redis in Docker (WSL), FastAPI runs locally with `uv run` (Windows)
+8. **`.env` drives Docker** — compose reads `POSTGRES_*` vars from `.env`

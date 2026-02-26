@@ -1,0 +1,107 @@
+---
+description: "Documentation and commenting standards: module docstrings, Google-style, when to comment"
+alwaysApply: true
+---
+
+# Documentation Standards
+
+## Module Docstring (every .py file)
+
+Every Python file gets a one-line docstring at the top explaining its purpose.
+
+```python
+"""PubMed E-Utilities repository — search and fetch publications from NCBI."""
+
+"""FastAPI router for federated search endpoints."""
+
+"""Deduplication service — DOI/PMID hard match + fuzzy title matching."""
+
+"""Pydantic schemas for the unified publication record."""
+```
+
+For complex modules, add a brief detail block:
+
+```python
+"""LangGraph research workflow — Agents A through C (fast path).
+
+Compiles the translate → fetch → dedup graph and exposes
+`run_search()` as the main entry point for the search service.
+"""
+```
+
+## Function/Method Docstrings (Google Style)
+
+Document **public** functions and methods. Skip obvious ones (getters, simple CRUD).
+
+```python
+async def federated_fetch(
+    query: str, sources: list[str]
+) -> tuple[list[RawRecord], list[FetchError]]:
+    """Fetch publications from all sources in parallel.
+
+    Args:
+        query: PubMed-style Boolean query string.
+        sources: List of source names to query.
+
+    Returns:
+        Tuple of (records, errors). Errors contain source name and reason.
+        Partial results are returned even if some sources fail.
+    """
+```
+
+## Class Docstrings
+
+```python
+class PublicationRepository:
+    """Data access for the publications table.
+
+    Handles CRUD operations and bulk upserts for deduplicated records.
+    Injected into services via FastAPI Depends().
+    """
+```
+
+## When to Comment (and When NOT to)
+
+**Comment the WHY, never the WHAT:**
+
+```python
+# BAD — restates the code
+# Set timeout to 30 seconds
+timeout = 30
+
+# GOOD — explains a non-obvious decision
+# PubMed rate-limits to 10/s with API key; 30s timeout
+# accounts for slow responses during peak NCBI traffic
+timeout = 30
+```
+
+**Good reasons to comment:**
+- Non-obvious business logic or domain rules
+- Workarounds for external API quirks
+- Performance trade-offs ("in-memory dedup because typical sets < 10K")
+- Regex patterns (always explain what they match)
+- Magic numbers that need context
+
+**Never comment:**
+- What the code literally does (the code says that already)
+- Every function parameter (that's what type hints + docstrings are for)
+- Obvious operations (`i += 1  # increment i`)
+- Commented-out code — delete it, git has history
+
+## TODO Comments
+
+Use sparingly. Always include context:
+
+```python
+# TODO(dawit): Add retry logic once NCBI rate limit headers are confirmed
+# TODO: Replace in-memory dedup with Redis-backed dedup for > 50K records
+```
+
+## Rules
+
+1. **Every `.py` file** gets a module docstring (first line of file)
+2. **Google style** docstrings — `Args:`, `Returns:`, `Raises:` sections
+3. **Public functions/classes** get docstrings — skip private helpers if obvious
+4. **Comments explain WHY** — never narrate what the code does
+5. **No commented-out code** — delete it
+6. **Type hints replace parameter type docs** — don't duplicate in docstrings
