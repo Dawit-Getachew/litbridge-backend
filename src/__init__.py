@@ -1,0 +1,1 @@
+"""LitBridge backend application package."""
