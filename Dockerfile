@@ -36,7 +36,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER app
 
-EXPOSE 8000
+EXPOSE 3000
 
 # Run Alembic migrations then start Gunicorn with Uvicorn workers
-CMD ["sh", "-c", "alembic upgrade head && gunicorn src.main:app --bind 0.0.0.0:8000 --workers 2 --worker-class uvicorn.workers.UvicornWorker --timeout 120 --graceful-timeout 30 --keep-alive 65"]
+CMD ["sh", "-c", "alembic upgrade head && gunicorn src.main:app --bind 0.0.0.0:3000 --workers 2 --worker-class uvicorn.workers.UvicornWorker --timeout 120 --graceful-timeout 30 --keep-alive 65"]
