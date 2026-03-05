@@ -176,7 +176,7 @@ async def test_europepmc_repository_maps_json_fields_correctly() -> None:
     }
 
     with respx.mock(assert_all_called=True) as mock:
-        mock.get("https://europepmc.org/webservices/rest/search").respond(
+        mock.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search").respond(
             status_code=200,
             json=europepmc_payload,
         )

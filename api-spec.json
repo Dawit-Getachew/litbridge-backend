@@ -1,0 +1,554 @@
+{
+  "_info": {
+    "title": "LitBridge API",
+    "version": "1.0.0",
+    "description": "Federated biomedical literature search with AI enrichment and conversational follow-up.",
+    "base_url": "/api/v1",
+    "content_type": "application/json",
+    "streaming_content_type": "text/event-stream"
+  },
+
+  "enums": {
+    "SourceType": {
+      "description": "External database sources for federated search.",
+      "values": ["pubmed", "europepmc", "openalex", "clinicaltrials"]
+    },
+    "OAStatus": {
+      "description": "Open-access availability status for a publication.",
+      "values": ["open", "closed", "unknown"]
+    },
+    "QueryType": {
+      "description": "How the query string should be interpreted.",
+      "values": ["free", "structured", "boolean", "abstract"]
+    },
+    "SearchMode": {
+      "description": "Search depth and AI analysis mode.",
+      "values": ["quick", "deep_research", "deep_analyze", "deep_thinking", "light_thinking"],
+      "behavior": {
+        "quick": {
+          "max_results_cap": 100,
+          "enrichment": false,
+          "ai_thinking": false,
+          "description": "Fast search, no AI enrichment or synthesis."
+        },
+        "deep_research": {
+          "max_results_cap": 5000,
+          "enrichment": false,
+          "ai_thinking": false,
+          "description": "Full-depth search up to 5000 results, no AI processing."
+        },
+        "deep_analyze": {
+          "max_results_cap": 5000,
+          "enrichment": true,
+          "ai_thinking": false,
+          "description": "Full-depth search with per-record TLDR and citation enrichment."
+        },
+        "deep_thinking": {
+          "max_results_cap": 5000,
+          "enrichment": true,
+          "ai_thinking": true,
+          "thinking_style": "comprehensive",
+          "description": "Full-depth search with enrichment plus token-by-token AI synthesis."
+        },
+        "light_thinking": {
+          "max_results_cap": 100,
+          "enrichment": false,
+          "ai_thinking": true,
+          "thinking_style": "concise",
+          "description": "Quick search with a short streamed AI summary paragraph."
+        }
+      }
+    }
+  },
+
+  "schemas": {
+    "PICOInput": {
+      "description": "Structured PICO query components. At least one field must be non-empty when query_type is 'structured'.",
+      "fields": {
+        "population":   { "type": "string | null", "default": null },
+        "intervention": { "type": "string | null", "default": null },
+        "comparison":   { "type": "string | null", "default": null },
+        "outcome":      { "type": "string | null", "default": null }
+      }
+    },
+    "SearchRequest": {
+      "description": "Request body for executing a search or streaming search.",
+      "fields": {
+        "query":        { "type": "string", "required": true, "description": "Free-text, Boolean, PICO, or abstract query." },
+        "query_type":   { "type": "QueryType", "default": "free" },
+        "search_mode":  { "type": "SearchMode", "default": "quick" },
+        "sources":      { "type": "SourceType[] | null", "default": null, "description": "Defaults to all 4 sources when null. Cannot be empty array." },
+        "pico":         { "type": "PICOInput | null", "default": null, "description": "Required when query_type is 'structured'." },
+        "max_results":  { "type": "integer", "default": 100, "min": 1, "max": 5000, "description": "Capped to 100 for quick and light_thinking modes." }
+      },
+      "validation_rules": [
+        "When query_type='structured', pico is required with at least one non-empty component.",
+        "When query_type='abstract', query must be at least 50 characters.",
+        "sources cannot be an empty array (use null for all sources).",
+        "max_results is capped to 100 when search_mode is 'quick' or 'light_thinking'."
+      ]
+    },
+    "SearchResponse": {
+      "description": "Returned when a non-streaming search is started.",
+      "fields": {
+        "search_id": { "type": "string", "description": "Opaque UUID identifying the search session." }
+      }
+    },
+    "SearchStatusResponse": {
+      "description": "Status of a running or completed search.",
+      "fields": {
+        "search_id":         { "type": "string" },
+        "status":            { "type": "'processing' | 'completed' | 'failed'" },
+        "total_count":       { "type": "integer", "default": 0 },
+        "sources_completed": { "type": "SourceType[]", "default": [] },
+        "sources_failed":    { "type": "SourceType[]", "default": [] },
+        "progress_pct":      { "type": "integer", "default": 0, "min": 0, "max": 100 }
+      }
+    },
+    "UnifiedRecord": {
+      "description": "Canonical deduplicated publication record.",
+      "fields": {
+        "id":                   { "type": "string" },
+        "title":                { "type": "string" },
+        "authors":              { "type": "string[]" },
+        "journal":              { "type": "string | null", "default": null },
+        "year":                 { "type": "integer | null", "default": null },
+        "doi":                  { "type": "string | null", "default": null },
+        "pmid":                 { "type": "string | null", "default": null },
+        "source":               { "type": "SourceType", "description": "Primary source this record came from." },
+        "sources_found_in":     { "type": "SourceType[]", "default": [], "description": "All sources where this record appeared." },
+        "tldr":                 { "type": "string | null", "default": null, "description": "One-sentence AI summary (populated after enrichment)." },
+        "citation_count":       { "type": "integer | null", "default": null },
+        "oa_status":            { "type": "OAStatus", "default": "unknown" },
+        "pdf_url":              { "type": "string | null", "default": null },
+        "abstract":             { "type": "string | null", "default": null },
+        "duplicate_cluster_id": { "type": "string | null", "default": null },
+        "prisma_stage":         { "type": "string | null", "default": null }
+      }
+    },
+    "PaginatedResults": {
+      "description": "One page of cursor-paginated search results.",
+      "fields": {
+        "search_id":   { "type": "string" },
+        "total_count":  { "type": "integer" },
+        "records":      { "type": "UnifiedRecord[]" },
+        "next_cursor":  { "type": "string | null", "default": null, "description": "Pass as ?cursor= to get the next page. Null means last page." }
+      }
+    },
+    "EnrichmentResponse": {
+      "description": "Enrichment metadata for a single record.",
+      "fields": {
+        "id":              { "type": "string" },
+        "tldr":            { "type": "string | null", "default": null },
+        "citation_count":  { "type": "integer | null", "default": null },
+        "oa_status":       { "type": "OAStatus | null", "default": null },
+        "pdf_url":         { "type": "string | null", "default": null }
+      }
+    },
+    "PrismaCounts": {
+      "description": "PRISMA systematic review flow diagram counts.",
+      "fields": {
+        "identified":          { "type": "integer", "description": "Total records found across all sources before dedup." },
+        "after_deduplication": { "type": "integer", "description": "Records remaining after duplicate removal." },
+        "screened":            { "type": "integer", "description": "Records passing screening filters." },
+        "excluded":            { "type": "integer", "description": "Records excluded by filters." },
+        "oa_retrieved":        { "type": "integer", "description": "Records with open-access full text available." }
+      }
+    },
+    "ChatRequest": {
+      "description": "Send a natural-language message about search results. No record IDs needed — reference papers by name.",
+      "fields": {
+        "search_id":       { "type": "string", "required": true, "description": "The search session whose results you're discussing." },
+        "message":         { "type": "string", "required": true, "min_length": 1, "max_length": 4000, "description": "Free-text message, e.g. 'Explain the Zhang 2024 paper' or 'Compare the first two results'." },
+        "conversation_id": { "type": "string | null", "default": null, "description": "Omit to start a new conversation. Provide to continue an existing one." }
+      }
+    },
+    "ResolvedRecord": {
+      "description": "Compact reference to a paper the system resolved from the user's message.",
+      "fields": {
+        "id":           { "type": "string" },
+        "title":        { "type": "string" },
+        "first_author": { "type": "string | null", "default": null },
+        "year":         { "type": "integer | null", "default": null }
+      }
+    },
+    "MessageResponse": {
+      "description": "One message in a conversation.",
+      "fields": {
+        "id":         { "type": "string" },
+        "role":       { "type": "'user' | 'assistant'", "description": "Who sent the message." },
+        "content":    { "type": "string" },
+        "record_ids": { "type": "string[] | null", "default": null, "description": "IDs of papers referenced in this message." },
+        "created_at": { "type": "datetime (ISO 8601)" }
+      }
+    },
+    "ConversationResponse": {
+      "description": "Metadata for a conversation thread.",
+      "fields": {
+        "id":            { "type": "string" },
+        "search_id":     { "type": "string" },
+        "title":         { "type": "string | null", "default": null, "description": "Auto-generated from the first message." },
+        "message_count": { "type": "integer" },
+        "created_at":    { "type": "datetime (ISO 8601)" },
+        "updated_at":    { "type": "datetime (ISO 8601)" }
+      }
+    },
+    "ConversationHistoryResponse": {
+      "description": "Full conversation with all messages.",
+      "fields": {
+        "conversation": { "type": "ConversationResponse" },
+        "messages":     { "type": "MessageResponse[]" }
+      }
+    }
+  },
+
+  "endpoints": {
+    "system": [
+      {
+        "method": "GET",
+        "path": "/",
+        "description": "API root — returns name, version, and status.",
+        "response": {
+          "type": "object",
+          "example": { "name": "LitBridge API", "version": "1.0.0", "status": "ok" }
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/health",
+        "description": "Health check — probes database and Redis connectivity.",
+        "response": {
+          "type": "object",
+          "fields": {
+            "status":   { "type": "string", "example": "ok" },
+            "database": { "type": "'connected' | 'unavailable'" },
+            "redis":    { "type": "'connected' | 'unavailable'" }
+          }
+        }
+      }
+    ],
+
+    "search": [
+      {
+        "method": "POST",
+        "path": "/api/v1/search",
+        "description": "Execute a search (non-streaming). Returns a search_id immediately; use /status and /results to poll.",
+        "request": { "$ref": "#/schemas/SearchRequest" },
+        "response": { "$ref": "#/schemas/SearchResponse" },
+        "errors": {
+          "404": "Search not found.",
+          "422": "Validation error (bad query_type, empty sources, etc.).",
+          "429": "Rate limit exceeded. Check Retry-After header.",
+          "502": "One or more source APIs failed."
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/search/preview",
+        "description": "Preview how the query will be translated for each source database, without executing a search.",
+        "request": { "$ref": "#/schemas/SearchRequest" },
+        "response": {
+          "type": "object",
+          "example": {
+            "translations": {
+              "pubmed": "(metformin[Title/Abstract]) AND (cardiovascular[Title/Abstract])",
+              "openalex": "metformin cardiovascular",
+              "europepmc": "(metformin) AND (cardiovascular)",
+              "clinicaltrials": "metformin cardiovascular"
+            }
+          }
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/search/stream",
+        "description": "Execute a search with real-time SSE streaming. Events arrive as each source completes, records are enriched, and AI synthesizes results.",
+        "request": { "$ref": "#/schemas/SearchRequest" },
+        "response": {
+          "type": "text/event-stream",
+          "description": "Server-Sent Events. See sse_events.search_stream for event types."
+        },
+        "response_headers": {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/search/{search_id}/status",
+        "description": "Check the status of a previously started search.",
+        "path_params": {
+          "search_id": { "type": "string", "description": "UUID from POST /search response." }
+        },
+        "response": { "$ref": "#/schemas/SearchStatusResponse" },
+        "errors": { "404": "Search not found." }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/results/{search_id}",
+        "description": "Retrieve one page of deduplicated search results with cursor pagination.",
+        "path_params": {
+          "search_id": { "type": "string" }
+        },
+        "query_params": {
+          "cursor": { "type": "string | null", "default": null, "description": "Pagination cursor from previous response's next_cursor." }
+        },
+        "response": { "$ref": "#/schemas/PaginatedResults" },
+        "errors": { "404": "Search not found." }
+      }
+    ],
+
+    "enrichment": [
+      {
+        "method": "GET",
+        "path": "/api/v1/enrichment/{search_id}/{record_id}",
+        "description": "Get AI enrichment (TLDR summary, citation count, OA status, PDF link) for a single record.",
+        "path_params": {
+          "search_id":  { "type": "string", "description": "Search session UUID." },
+          "record_id":  { "type": "string", "description": "Record ID from UnifiedRecord.id." }
+        },
+        "response": { "$ref": "#/schemas/EnrichmentResponse" },
+        "errors": {
+          "404": "Search or record not found."
+        }
+      }
+    ],
+
+    "prisma": [
+      {
+        "method": "GET",
+        "path": "/api/v1/prisma/{search_id}",
+        "description": "Compute PRISMA systematic review flow counts for a completed search, with optional filters.",
+        "path_params": {
+          "search_id": { "type": "string" }
+        },
+        "query_params": {
+          "year_from":        { "type": "integer | null", "default": null, "description": "Filter: minimum publication year." },
+          "year_to":          { "type": "integer | null", "default": null, "description": "Filter: maximum publication year." },
+          "sources":          { "type": "string | null", "default": null, "description": "Comma-separated source names, e.g. 'pubmed,openalex'." },
+          "open_access_only": { "type": "boolean", "default": false, "description": "If true, only count open-access records." }
+        },
+        "response": { "$ref": "#/schemas/PrismaCounts" },
+        "errors": {
+          "404": "Search not found.",
+          "422": "Invalid source name in sources parameter."
+        }
+      }
+    ],
+
+    "chat": [
+      {
+        "method": "POST",
+        "path": "/api/v1/chat/stream",
+        "description": "Send a natural-language follow-up message about search results. Response streams token-by-token via SSE. Reference papers by name — no IDs required.",
+        "request": { "$ref": "#/schemas/ChatRequest" },
+        "response": {
+          "type": "text/event-stream",
+          "description": "Server-Sent Events. See sse_events.chat_stream for event types."
+        },
+        "response_headers": {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive"
+        },
+        "example_messages": [
+          "Explain the Zhang 2024 paper in simple terms",
+          "Deep dive into the RECOVERY trial's methodology",
+          "Compare the first paper with the WHO solidarity trial",
+          "What are the limitations across all these studies?",
+          "Find more research related to that hydroxychloroquine meta-analysis"
+        ]
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/chat/{conversation_id}/history",
+        "description": "Retrieve full conversation history with all messages.",
+        "path_params": {
+          "conversation_id": { "type": "string", "description": "UUID from chat_started event or previous conversation." }
+        },
+        "response": { "$ref": "#/schemas/ConversationHistoryResponse" },
+        "errors": { "404": "Conversation not found." }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/chat/conversations/{search_id}",
+        "description": "List all conversation threads for a search session.",
+        "path_params": {
+          "search_id": { "type": "string" }
+        },
+        "response": {
+          "type": "ConversationResponse[]",
+          "description": "Array of conversations, newest first. Empty array if none."
+        }
+      }
+    ]
+  },
+
+  "sse_events": {
+    "_wire_format": "Each SSE message has two lines: 'event: <type>\\ndata: <json>\\n\\n'. A keepalive comment ': keepalive\\n\\n' is sent every 15 seconds of inactivity.",
+
+    "search_stream": {
+      "description": "Events emitted by POST /api/v1/search/stream. Events arrive in chronological order through the search lifecycle.",
+      "event_sequence": [
+        "search_started",
+        "status (translating query)",
+        "status (searching sources)",
+        "source_searching (one per source)",
+        "source_completed / source_failed (one per source, interleaved)",
+        "status (found N articles from Source)",
+        "status (removing duplicates)",
+        "dedup_completed",
+        "status (N unique articles remain)",
+        "status (enriching with AI) — only deep_analyze / deep_thinking",
+        "record_enriched (one per record) — only deep_analyze / deep_thinking",
+        "status (analyzing results) — only deep_thinking / light_thinking",
+        "thinking (multiple, token-by-token) — only deep_thinking / light_thinking",
+        "search_completed",
+        "error (if something fails)"
+      ],
+      "events": {
+        "search_started": {
+          "description": "First event. Confirms the search session was created.",
+          "data": {
+            "search_id":   { "type": "string", "description": "UUID for this search session." },
+            "sources":     { "type": "string[]", "example": ["pubmed", "openalex", "europepmc", "clinicaltrials"] },
+            "search_mode": { "type": "string", "example": "deep_thinking" }
+          }
+        },
+        "status": {
+          "description": "Human-readable narration of what the system is doing. Show this in the UI like ChatGPT's 'Searching...' messages.",
+          "data": {
+            "message": { "type": "string", "examples": [
+              "Translating query for each database...",
+              "Searching PubMed, OpenAlex, Europe PMC, ClinicalTrials.gov...",
+              "Found 42 articles from PubMed.",
+              "Removing duplicates from 180 total articles...",
+              "Removed 30 duplicates — 150 unique articles remain.",
+              "Enriching 150 articles with AI summaries and citations...",
+              "Enrichment complete — 150 articles processed.",
+              "Analyzing and synthesizing results..."
+            ]}
+          }
+        },
+        "source_searching": {
+          "description": "Emitted when a source fetch begins.",
+          "data": {
+            "source":  { "type": "SourceType" },
+            "message": { "type": "string", "example": "Searching PubMed..." }
+          }
+        },
+        "source_completed": {
+          "description": "One source finished successfully.",
+          "data": {
+            "source":      { "type": "SourceType" },
+            "count":       { "type": "integer", "description": "Number of records found from this source." },
+            "duration_ms": { "type": "integer", "description": "Time taken in milliseconds." }
+          }
+        },
+        "source_failed": {
+          "description": "One source failed. Search continues with remaining sources.",
+          "data": {
+            "source": { "type": "SourceType" },
+            "error":  { "type": "string" }
+          }
+        },
+        "dedup_completed": {
+          "description": "Deduplication finished.",
+          "data": {
+            "total_before":       { "type": "integer" },
+            "total_after":        { "type": "integer" },
+            "duplicates_removed": { "type": "integer" }
+          }
+        },
+        "record_enriched": {
+          "description": "One record was enriched with TLDR/citations. Only emitted in deep_analyze and deep_thinking modes.",
+          "data": {
+            "id":             { "type": "string", "description": "UnifiedRecord.id" },
+            "tldr":           { "type": "string | null" },
+            "citation_count": { "type": "integer | null" },
+            "progress":       { "type": "string", "example": "5/150", "description": "Completed/total count." }
+          }
+        },
+        "thinking": {
+          "description": "One token of AI synthesis. Concatenate all chunks to build the full analysis. Only emitted in deep_thinking and light_thinking modes.",
+          "data": {
+            "chunk": { "type": "string", "description": "A fragment of the AI's response text." }
+          }
+        },
+        "search_completed": {
+          "description": "Last event. Search is finished.",
+          "data": {
+            "search_id":   { "type": "string" },
+            "total_count": { "type": "integer", "description": "Final deduplicated record count." }
+          }
+        },
+        "error": {
+          "description": "Emitted if the search fails. May appear at any point.",
+          "data": {
+            "error": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "chat_stream": {
+      "description": "Events emitted by POST /api/v1/chat/stream.",
+      "event_sequence": [
+        "chat_started",
+        "thinking (multiple, token-by-token)",
+        "chat_completed",
+        "error (if something fails)"
+      ],
+      "events": {
+        "chat_started": {
+          "description": "Conversation identified and paper references resolved.",
+          "data": {
+            "conversation_id":  { "type": "string", "description": "UUID. Use this for follow-up messages." },
+            "resolved_records": {
+              "type": "ResolvedRecord[]",
+              "description": "Papers the system thinks the user is referring to. Highlight these in the UI.",
+              "example": [
+                { "id": "rec-1", "title": "Remdesivir for Treatment of COVID-19", "first_author": "Zhang L", "year": 2024 }
+              ]
+            }
+          }
+        },
+        "thinking": {
+          "description": "One token of the AI's response. Concatenate all chunks.",
+          "data": {
+            "chunk": { "type": "string" }
+          }
+        },
+        "chat_completed": {
+          "description": "Response finished and persisted.",
+          "data": {
+            "conversation_id": { "type": "string" },
+            "message_id":      { "type": "string | null", "description": "UUID of the persisted assistant message." }
+          }
+        },
+        "error": {
+          "description": "Emitted on failure.",
+          "data": {
+            "error": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+
+  "errors": {
+    "format": {
+      "description": "All error responses follow this structure.",
+      "body": {
+        "detail": { "type": "string", "description": "Human-readable error message." }
+      }
+    },
+    "status_codes": {
+      "404": "Resource not found (search, record, or conversation).",
+      "422": "Validation error (malformed request body, invalid enum values, constraint violations).",
+      "429": "Rate limit exceeded. Check the Retry-After header for seconds to wait.",
+      "502": "Upstream source API failure."
+    }
+  }
+}

@@ -22,12 +22,30 @@ class SearchRequest(BaseModel):
     def validate_and_normalize(self) -> Self:
         """Validate cross-field requirements and normalize defaults."""
 
-        if self.query_type is QueryType.PICO and self.pico is None:
-            raise ValueError("pico must be provided when query_type is structured")
+        if self.query_type is QueryType.PICO:
+            if self.pico is None:
+                raise ValueError("pico must be provided when query_type is structured")
+            if not any(
+                component and component.strip()
+                for component in (
+                    self.pico.population,
+                    self.pico.intervention,
+                    self.pico.comparison,
+                    self.pico.outcome,
+                )
+            ):
+                raise ValueError("pico must contain at least one non-empty component")
+
+        if self.query_type is QueryType.ABSTRACT and len(self.query.strip()) < 50:
+            raise ValueError("abstract query_type requires query of at least 50 characters")
+
         if self.sources == []:
             raise ValueError("sources cannot be an empty list")
         if self.sources is None:
             self.sources = list(SourceType)
+
+        if self.search_mode in {SearchMode.QUICK, SearchMode.LIGHT_THINKING}:
+            self.max_results = min(self.max_results, 100)
         return self
 
 

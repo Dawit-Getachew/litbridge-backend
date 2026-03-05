@@ -41,3 +41,8 @@ packages = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: integration tests requiring wired service graph",
+    "unit: unit tests with no external dependencies",
+]

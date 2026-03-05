@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.v1.chat import router as chat_router
 from src.api.v1.enrichment import router as enrichment_router
 from src.api.v1.prisma import router as prisma_router
 from src.api.v1.search import router as search_router
@@ -69,6 +70,7 @@ app.add_exception_handler(LitBridgeError, domain_exception_handler)
 app.include_router(search_router, prefix="/api/v1")
 app.include_router(enrichment_router, prefix="/api/v1")
 app.include_router(prisma_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="/api/v1")
 
 
 @app.get("/")

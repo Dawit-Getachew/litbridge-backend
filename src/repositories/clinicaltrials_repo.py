@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 from src.core.exceptions import SourceFetchError
@@ -18,6 +23,7 @@ class ClinicalTrialsRepository(BaseSourceRepository):
     min_request_interval = 0.2  # conservative ~5 req/s
     _BASE_URL = "https://clinicaltrials.gov/api/v2/studies"
     _PAGE_SIZE = 100
+    _FALLBACK_USER_AGENT = "LitBridge/1.0 (+https://litbridge.local)"
 
     async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
         """Search studies by query.term with page-token pagination."""
@@ -36,15 +42,17 @@ class ClinicalTrialsRepository(BaseSourceRepository):
                 params["pageToken"] = page_token
 
             try:
-                response = await self._request(
-                    method="GET",
-                    url=self._BASE_URL,
-                    params=params,
-                )
-            except SourceFetchError:
-                break
+                payload = await self._request_payload(url=self._BASE_URL, params=params)
+            except SourceFetchError as exc:
+                if records:
+                    self.logger.warning(
+                        "clinicaltrials_partial_fetch_failed",
+                        status_code=exc.status_code,
+                        collected_records=len(records),
+                    )
+                    break
+                raise
 
-            payload = response.json()
             studies = payload.get("studies", [])
 
             for study in studies:
@@ -66,14 +74,10 @@ class ClinicalTrialsRepository(BaseSourceRepository):
             return None
 
         try:
-            response = await self._request(
-                method="GET",
-                url=f"{self._BASE_URL}/{source_id}",
-            )
+            payload = await self._request_payload(url=f"{self._BASE_URL}/{source_id}")
         except SourceFetchError:
             return None
 
-        payload = response.json()
         if isinstance(payload, dict) and "studies" in payload:
             studies = payload.get("studies", [])
             if not studies:
@@ -82,6 +86,92 @@ class ClinicalTrialsRepository(BaseSourceRepository):
         if isinstance(payload, dict):
             return self._study_to_raw_record(payload)
         return None
+
+    async def _request_payload(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            response = await self._request(method="GET", url=url, params=params)
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            raise SourceFetchError(
+                source=self.source.value,
+                status_code=502,
+                message="Invalid JSON payload from ClinicalTrials.gov",
+            )
+        except SourceFetchError as exc:
+            if exc.status_code != 403:
+                raise
+
+        fallback_payload = await self._request_payload_via_urllib(url=url, params=params)
+        if fallback_payload is not None:
+            self.logger.info("clinicaltrials_httpx_403_fallback_succeeded", url=url)
+            return fallback_payload
+
+        raise SourceFetchError(
+            source=self.source.value,
+            status_code=403,
+            message="ClinicalTrials.gov rejected request and urllib fallback failed",
+        )
+
+    async def _request_payload_via_urllib(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        request_url = self._build_url(url=url, params=params)
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": self._FALLBACK_USER_AGENT,
+        }
+
+        await self._apply_local_rate_limit()
+
+        def _fetch() -> tuple[int, str]:
+            request = urllib.request.Request(request_url, headers=headers, method="GET")
+            with urllib.request.urlopen(request, timeout=self.request_timeout) as response:
+                status = int(getattr(response, "status", 200))
+                body = response.read().decode("utf-8")
+            return status, body
+
+        try:
+            status_code, raw_body = await asyncio.to_thread(_fetch)
+        except urllib.error.HTTPError as exc:
+            self.logger.warning(
+                "clinicaltrials_urllib_http_error",
+                status_code=exc.code,
+                url=request_url,
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive external I/O guard
+            self.logger.warning(
+                "clinicaltrials_urllib_request_error",
+                url=request_url,
+                error=str(exc),
+            )
+            return None
+
+        if status_code >= 400:
+            self.logger.warning(
+                "clinicaltrials_urllib_client_error",
+                status_code=status_code,
+                url=request_url,
+            )
+            return None
+
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            self.logger.warning("clinicaltrials_urllib_decode_failed", url=request_url)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def _build_url(self, url: str, params: dict[str, Any] | None = None) -> str:
+        if not params:
+            return url
+        query = urllib.parse.urlencode(params, doseq=True)
+        return f"{url}?{query}"
 
     def _study_to_raw_record(self, study: dict[str, Any]) -> RawRecord | None:
         protocol = study.get("protocolSection", {})

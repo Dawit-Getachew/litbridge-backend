@@ -4,13 +4,27 @@ from collections.abc import AsyncGenerator
 
 import httpx
 import redis.asyncio as redis
-from fastapi import Request
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.ai.llm_client import LLMClient
 from src.core.config import Settings, get_settings as get_cached_settings
 from src.core.database import get_db_session
 from src.core.redis import get_redis as get_redis_client
+from src.repositories.conversation_repo import ConversationRepository
+from src.repositories.europepmc_repo import EuropePMCRepository
+from src.repositories.openalex_repo import OpenAlexRepository
+from src.repositories.semantic_scholar_repo import SemanticScholarRepository
+from src.repositories.search_repo import SearchRepository
+from src.repositories.unpaywall_repo import UnpaywallRepository
 from src.services import FetcherService
+from src.services.chat_service import ChatService
+from src.services.dedup_service import DedupService
+from src.services.enrichment_service import EnrichmentService
+from src.services.oa_service import OAService
+from src.services.prisma_service import PrismaService
+from src.services.search_service import SearchService
+from src.services.streaming_search_service import StreamingSearchService
 
 
 def get_settings() -> Settings:
@@ -49,7 +63,141 @@ def get_fetcher_service(request: Request) -> FetcherService:
     )
 
 
-def get_search_repo() -> None:
-    """Placeholder dependency for search repository wiring."""
+def get_dedup_service() -> DedupService:
+    """Return a deduplication service instance."""
 
-    return None
+    return DedupService()
+
+
+def get_prisma_service() -> PrismaService:
+    """Return a PRISMA computation service instance."""
+
+    return PrismaService()
+
+
+async def get_search_repo(db: AsyncSession = Depends(get_db)) -> SearchRepository:
+    """Return search session repository bound to current DB session."""
+
+    return SearchRepository(db=db)
+
+
+def get_semantic_scholar_repo(request: Request) -> SemanticScholarRepository:
+    """Return Semantic Scholar enrichment repository instance."""
+
+    return SemanticScholarRepository(
+        client=get_http_client(request),
+        redis_client=get_redis(request),
+        settings=get_settings(),
+    )
+
+
+def get_openalex_repo(request: Request) -> OpenAlexRepository:
+    """Return OpenAlex repository instance."""
+
+    return OpenAlexRepository(
+        client=get_http_client(request),
+        settings=get_settings(),
+    )
+
+
+def get_europepmc_repo(request: Request) -> EuropePMCRepository:
+    """Return Europe PMC repository instance."""
+
+    return EuropePMCRepository(
+        client=get_http_client(request),
+        settings=get_settings(),
+    )
+
+
+def get_unpaywall_repo(request: Request) -> UnpaywallRepository:
+    """Return Unpaywall repository instance."""
+
+    return UnpaywallRepository(
+        client=get_http_client(request),
+        redis_client=get_redis(request),
+        settings=get_settings(),
+    )
+
+
+def get_llm_client() -> LLMClient:
+    """Return shared LLM client abstraction."""
+
+    return LLMClient(settings=get_settings())
+
+
+def get_enrichment_service(request: Request) -> EnrichmentService:
+    """Return enrichment orchestrator service."""
+
+    return EnrichmentService(
+        s2_repo=get_semantic_scholar_repo(request),
+        llm_client=get_llm_client(),
+        redis_client=get_redis(request),
+    )
+
+
+def get_oa_service(request: Request) -> OAService:
+    """Return open-access resolution service."""
+
+    return OAService(
+        openalex_repo=get_openalex_repo(request),
+        unpaywall_repo=get_unpaywall_repo(request),
+        europepmc_repo=get_europepmc_repo(request),
+        redis_client=get_redis(request),
+    )
+
+
+async def get_search_service(
+    request: Request,
+    search_repo: SearchRepository = Depends(get_search_repo),
+) -> SearchService:
+    """Return the orchestrator for search execution and retrieval."""
+
+    return SearchService(
+        fetcher=get_fetcher_service(request),
+        dedup=get_dedup_service(),
+        prisma=get_prisma_service(),
+        search_repo=search_repo,
+        redis_client=get_redis(request),
+        enrichment_service=get_enrichment_service(request),
+        oa_service=get_oa_service(request),
+    )
+
+
+async def get_streaming_search_service(
+    request: Request,
+    search_repo: SearchRepository = Depends(get_search_repo),
+) -> StreamingSearchService:
+    """Return the orchestrator for streaming search execution."""
+
+    return StreamingSearchService(
+        fetcher=get_fetcher_service(request),
+        dedup=get_dedup_service(),
+        prisma=get_prisma_service(),
+        search_repo=search_repo,
+        redis_client=get_redis(request),
+        enrichment_service=get_enrichment_service(request),
+        oa_service=get_oa_service(request),
+    )
+
+
+async def get_conversation_repo(
+    db: AsyncSession = Depends(get_db),
+) -> ConversationRepository:
+    """Return conversation repository bound to current DB session."""
+
+    return ConversationRepository(db=db)
+
+
+async def get_chat_service(
+    request: Request,
+    conversation_repo: ConversationRepository = Depends(get_conversation_repo),
+) -> ChatService:
+    """Return the conversational chat service."""
+
+    settings = get_settings()
+    return ChatService(
+        conversation_repo=conversation_repo,
+        llm_client=get_llm_client(),
+        max_history_turns=settings.CHAT_MAX_HISTORY_TURNS,
+        max_context_records=settings.CHAT_MAX_CONTEXT_RECORDS,
+    )

@@ -122,12 +122,18 @@ def test_unified_record_json_matches_snake_case_contract() -> None:
     "event_type",
     [
         "search_started",
+        "status",
+        "source_searching",
         "source_completed",
         "source_failed",
         "dedup_completed",
         "enrichment_update",
+        "record_enriched",
         "thinking",
         "search_completed",
+        "chat_started",
+        "citation",
+        "chat_completed",
         "error",
     ],
 )

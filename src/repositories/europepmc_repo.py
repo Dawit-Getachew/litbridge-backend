@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import httpx
+
 from src.core.exceptions import SourceFetchError
 from src.repositories.base_repo import BaseSourceRepository
 from src.schemas.enums import OAStatus, SourceType
@@ -16,7 +18,8 @@ class EuropePMCRepository(BaseSourceRepository):
 
     source = SourceType.EUROPEPMC
     min_request_interval = 0.1  # 10 req/s
-    _SEARCH_URL = "https://europepmc.org/webservices/rest/search"
+    _SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    _FULLTEXT_URL_TEMPLATE = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmid}/fullTextXML"
     _PAGE_SIZE = 100
 
     async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
@@ -40,8 +43,15 @@ class EuropePMCRepository(BaseSourceRepository):
                         "cursorMark": cursor,
                     },
                 )
-            except SourceFetchError:
-                break
+            except SourceFetchError as exc:
+                if records:
+                    self.logger.warning(
+                        "europepmc_partial_fetch_failed",
+                        status_code=exc.status_code,
+                        collected_records=len(records),
+                    )
+                    break
+                raise
 
             payload = response.json()
             result_list = payload.get("resultList", {})
@@ -87,6 +97,26 @@ class EuropePMCRepository(BaseSourceRepository):
         if not entries:
             return None
         return self._entry_to_raw_record(entries[0])
+
+    async def get_fulltext_url(self, pmid: str) -> str | None:
+        """Return Europe PMC full-text XML URL when full text is available."""
+        normalized_pmid = pmid.strip()
+        if not normalized_pmid:
+            return None
+
+        fulltext_url = self._FULLTEXT_URL_TEMPLATE.format(pmid=normalized_pmid)
+
+        await self._apply_local_rate_limit()
+        try:
+            response = await self.client.head(fulltext_url, timeout=self.request_timeout)
+            if response.status_code == 405:
+                response = await self.client.get(fulltext_url, timeout=self.request_timeout)
+        except httpx.HTTPError:
+            return None
+
+        if response.status_code == 200:
+            return fulltext_url
+        return None
 
     def _entry_to_raw_record(self, entry: dict[str, Any]) -> RawRecord | None:
         source_id = (entry.get("pmid") or entry.get("id") or "").strip()

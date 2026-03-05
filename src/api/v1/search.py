@@ -1,5 +1,93 @@
-"""FastAPI router placeholder for search endpoints."""
+"""FastAPI router for search execution, status, and result pagination."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
-router = APIRouter(prefix="/search", tags=["Search"])
+from src.ai.adapters import translate_for_all_sources
+from src.api.v1.sse import stream_generator
+from src.core.exceptions import RateLimitError, SearchNotFoundError, SourceFetchError
+from src.core.deps import get_search_service, get_streaming_search_service
+from src.schemas.records import PaginatedResults
+from src.schemas.search import SearchRequest, SearchResponse, SearchStatusResponse
+from src.services.search_service import SearchService
+from src.services.streaming_search_service import StreamingSearchService
+
+router = APIRouter(tags=["Search"])
+
+
+def _map_domain_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, SearchNotFoundError):
+        return HTTPException(status_code=404, detail=exc.message)
+    if isinstance(exc, SourceFetchError):
+        return HTTPException(status_code=502, detail=exc.message)
+    if isinstance(exc, RateLimitError):
+        return HTTPException(
+            status_code=429,
+            detail=exc.message,
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    raise exc
+
+
+@router.post("/search", response_model=SearchResponse)
+async def execute_search(
+    request: SearchRequest,
+    service: SearchService = Depends(get_search_service),
+) -> SearchResponse:
+    """Run the fast-path search flow and return an opaque search_id."""
+    try:
+        return await service.execute_search(request)
+    except (SearchNotFoundError, SourceFetchError, RateLimitError) as exc:
+        raise _map_domain_error(exc) from exc
+
+
+@router.post("/search/preview")
+async def preview_search_query(
+    request: SearchRequest,
+) -> dict[str, dict[str, str]]:
+    """Return per-source translated query previews without executing search."""
+    translated = await translate_for_all_sources(
+        query=request.query,
+        query_type=request.query_type,
+        pico=request.pico,
+        sources=request.sources,
+    )
+    return {"translations": {source.value: query for source, query in translated.items()}}
+
+
+@router.post("/search/stream")
+async def stream_search(
+    request: SearchRequest,
+    service: StreamingSearchService = Depends(get_streaming_search_service),
+) -> StreamingResponse:
+    """Stream search progress as server-sent events."""
+    return StreamingResponse(
+        stream_generator(service.execute_search_stream(request)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@router.get("/search/{search_id}/status", response_model=SearchStatusResponse)
+async def get_search_status(
+    search_id: str,
+    service: SearchService = Depends(get_search_service),
+) -> SearchStatusResponse:
+    """Return persisted status metadata for a search session."""
+    try:
+        return await service.get_search_status(search_id)
+    except (SearchNotFoundError, SourceFetchError, RateLimitError) as exc:
+        raise _map_domain_error(exc) from exc
+
+
+@router.get("/results/{search_id}", response_model=PaginatedResults)
+async def get_results_page(
+    search_id: str,
+    cursor: str | None = Query(default=None),
+    service: SearchService = Depends(get_search_service),
+) -> PaginatedResults:
+    """Return one cursor-paginated results page for a completed search."""
+    try:
+        return await service.get_results(search_id, cursor)
+    except (SearchNotFoundError, SourceFetchError, RateLimitError) as exc:
+        raise _map_domain_error(exc) from exc
