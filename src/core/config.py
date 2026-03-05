@@ -1,7 +1,9 @@
 """Application settings loaded from environment variables."""
 
+import json
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,10 +24,24 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str
     OPENROUTER_MODEL: str
     SEMANTIC_SCHOLAR_API_KEY: str = ""
-    CORS_ORIGINS: list[str]
+    CORS_ORIGINS: list[str] = ["*"]
     SECRET_KEY: str
     CHAT_MAX_HISTORY_TURNS: int = 10
     CHAT_MAX_CONTEXT_RECORDS: int = 25
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
+        """Accept JSON array, comma-separated string, or plain wildcard."""
+        if isinstance(v, list):
+            return v
+        v = v.strip()
+        if v.startswith("["):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                pass
+        return [origin.strip() for origin in v.split(",") if origin.strip()]
 
     model_config = SettingsConfigDict(
         env_file=".env",
