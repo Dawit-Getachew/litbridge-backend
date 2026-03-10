@@ -6,7 +6,8 @@ from fastapi.responses import StreamingResponse
 from src.ai.adapters import translate_for_all_sources
 from src.api.v1.sse import stream_generator
 from src.core.exceptions import RateLimitError, SearchNotFoundError, SourceFetchError
-from src.core.deps import get_search_service, get_streaming_search_service
+from src.core.deps import get_current_user_optional, get_search_service, get_streaming_search_service
+from src.models.user import User
 from src.schemas.records import PaginatedResults
 from src.schemas.search import SearchRequest, SearchResponse, SearchStatusResponse
 from src.services.search_service import SearchService
@@ -33,10 +34,13 @@ def _map_domain_error(exc: Exception) -> HTTPException:
 async def execute_search(
     request: SearchRequest,
     service: SearchService = Depends(get_search_service),
+    user: User | None = Depends(get_current_user_optional),
 ) -> SearchResponse:
     """Run the fast-path search flow and return an opaque search_id."""
     try:
-        return await service.execute_search(request)
+        return await service.execute_search(
+            request, user_id=str(user.id) if user else None,
+        )
     except (SearchNotFoundError, SourceFetchError, RateLimitError) as exc:
         raise _map_domain_error(exc) from exc
 
@@ -44,6 +48,7 @@ async def execute_search(
 @router.post("/search/preview")
 async def preview_search_query(
     request: SearchRequest,
+    user: User | None = Depends(get_current_user_optional),
 ) -> dict[str, dict[str, str]]:
     """Return per-source translated query previews without executing search."""
     translated = await translate_for_all_sources(
@@ -59,10 +64,13 @@ async def preview_search_query(
 async def stream_search(
     request: SearchRequest,
     service: StreamingSearchService = Depends(get_streaming_search_service),
+    user: User | None = Depends(get_current_user_optional),
 ) -> StreamingResponse:
     """Stream search progress as server-sent events."""
     return StreamingResponse(
-        stream_generator(service.execute_search_stream(request)),
+        stream_generator(service.execute_search_stream(
+            request, user_id=str(user.id) if user else None,
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
@@ -72,6 +80,7 @@ async def stream_search(
 async def get_search_status(
     search_id: str,
     service: SearchService = Depends(get_search_service),
+    user: User | None = Depends(get_current_user_optional),
 ) -> SearchStatusResponse:
     """Return persisted status metadata for a search session."""
     try:
@@ -85,6 +94,7 @@ async def get_results_page(
     search_id: str,
     cursor: str | None = Query(default=None),
     service: SearchService = Depends(get_search_service),
+    user: User | None = Depends(get_current_user_optional),
 ) -> PaginatedResults:
     """Return one cursor-paginated results page for a completed search."""
     try:

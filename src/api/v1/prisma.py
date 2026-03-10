@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from src.core.deps import get_prisma_service, get_search_repo
+from src.core.deps import get_current_user_optional, get_prisma_service, get_search_repo
 from src.core.exceptions import SearchNotFoundError
+from src.models.user import User
 from src.repositories.search_repo import SearchRepository
 from src.schemas.enums import SourceType
 from src.schemas.prisma import PrismaCounts, PrismaFilters
@@ -43,6 +44,7 @@ async def get_prisma_counts(
     open_access_only: bool = Query(default=False),
     search_repo: SearchRepository = Depends(get_search_repo),
     prisma_service: PrismaService = Depends(get_prisma_service),
+    user: User | None = Depends(get_current_user_optional),
 ) -> PrismaCounts:
     """Compute PRISMA counts for one search with optional filters."""
     session = await search_repo.get_session(search_id)

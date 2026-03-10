@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from src.api.v1.sse import stream_generator
-from src.core.deps import get_chat_service, get_conversation_repo
+from src.core.deps import get_chat_service, get_conversation_repo, get_current_user_optional
+from src.models.user import User
 from src.repositories.conversation_repo import ConversationRepository
 from src.schemas.chat import (
     ChatRequest,
@@ -21,6 +22,7 @@ router = APIRouter(tags=["Chat"])
 async def stream_chat(
     request: ChatRequest,
     service: ChatService = Depends(get_chat_service),
+    user: User | None = Depends(get_current_user_optional),
 ) -> StreamingResponse:
     """Stream a conversational AI response about search results."""
     return StreamingResponse(
@@ -37,6 +39,7 @@ async def stream_chat(
 async def get_conversation_history(
     conversation_id: str,
     repo: ConversationRepository = Depends(get_conversation_repo),
+    user: User | None = Depends(get_current_user_optional),
 ) -> ConversationHistoryResponse:
     """Retrieve full conversation with messages."""
     conversation = await repo.get_conversation(conversation_id)
@@ -72,6 +75,7 @@ async def get_conversation_history(
 async def list_conversations(
     search_id: str,
     repo: ConversationRepository = Depends(get_conversation_repo),
+    user: User | None = Depends(get_current_user_optional),
 ) -> list[ConversationResponse]:
     """List all conversation threads for a search session."""
     conversations = await repo.list_conversations(search_id)

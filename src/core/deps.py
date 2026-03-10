@@ -1,30 +1,46 @@
 """Dependency providers for database, cache, HTTP, and settings."""
 
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator
+from uuid import UUID
 
 import httpx
+import jwt
 import redis.asyncio as redis
 from fastapi import Depends, Request
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ai.llm_client import LLMClient
 from src.core.config import Settings, get_settings as get_cached_settings
 from src.core.database import get_db_session
+from src.core.exceptions import AuthenticationError
 from src.core.redis import get_redis as get_redis_client
+from src.core.security import decode_access_token
+from src.models.user import User
 from src.repositories.conversation_repo import ConversationRepository
 from src.repositories.europepmc_repo import EuropePMCRepository
 from src.repositories.openalex_repo import OpenAlexRepository
 from src.repositories.semantic_scholar_repo import SemanticScholarRepository
+from src.repositories.library_repo import LibraryRepository
 from src.repositories.search_repo import SearchRepository
 from src.repositories.unpaywall_repo import UnpaywallRepository
+from src.repositories.user_repo import UserRepository
 from src.services import FetcherService
+from src.services.auth_service import AuthService
 from src.services.chat_service import ChatService
 from src.services.dedup_service import DedupService
+from src.services.email_service import EmailService
 from src.services.enrichment_service import EnrichmentService
 from src.services.oa_service import OAService
 from src.services.prisma_service import PrismaService
+from src.services.library_service import LibraryService
 from src.services.search_service import SearchService
 from src.services.streaming_search_service import StreamingSearchService
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/verify-otp", auto_error=True)
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/verify-otp", auto_error=False)
 
 
 def get_settings() -> Settings:
@@ -201,3 +217,86 @@ async def get_chat_service(
         max_history_turns=settings.CHAT_MAX_HISTORY_TURNS,
         max_context_records=settings.CHAT_MAX_CONTEXT_RECORDS,
     )
+
+
+# ── Library dependencies ─────────────────────────────────────────
+
+async def get_library_repo(db: AsyncSession = Depends(get_db)) -> LibraryRepository:
+    """Return library repository bound to current DB session."""
+
+    return LibraryRepository(db=db)
+
+
+async def get_library_service(
+    library_repo: LibraryRepository = Depends(get_library_repo),
+    search_repo: SearchRepository = Depends(get_search_repo),
+) -> LibraryService:
+    """Return the library/collections service."""
+
+    return LibraryService(library_repo=library_repo, search_repo=search_repo)
+
+
+# ── Auth dependencies ────────────────────────────────────────────
+
+async def get_user_repo(db: AsyncSession = Depends(get_db)) -> UserRepository:
+    """Return user repository bound to the current DB session."""
+
+    return UserRepository(db=db)
+
+
+def get_email_service(request: Request) -> EmailService:
+    """Return the email delivery service."""
+
+    return EmailService(
+        http_client=get_http_client(request),
+        settings=get_settings(),
+    )
+
+
+async def get_auth_service(
+    request: Request,
+    user_repo: UserRepository = Depends(get_user_repo),
+) -> AuthService:
+    """Return the authentication orchestrator."""
+
+    return AuthService(
+        user_repo=user_repo,
+        email_service=get_email_service(request),
+        redis_client=get_redis(request),
+        settings=get_settings(),
+    )
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    user_repo: UserRepository = Depends(get_user_repo),
+) -> User:
+    """Decode JWT and load the authenticated user, or raise 401."""
+
+    try:
+        payload = decode_access_token(token)
+    except jwt.InvalidTokenError:
+        raise AuthenticationError("Invalid or expired access token.")
+
+    user_id = payload.get("sub")
+    if user_id is None:
+        raise AuthenticationError("Malformed token payload.")
+
+    user = await user_repo.get_by_id(UUID(user_id))
+    if user is None or not user.is_active:
+        raise AuthenticationError("User not found or deactivated.")
+    return user
+
+
+async def get_current_user_optional(
+    token: str | None = Depends(oauth2_scheme_optional),
+    user_repo: UserRepository = Depends(get_user_repo),
+) -> User | None:
+    """Like ``get_current_user`` but returns ``None`` when no token is present."""
+
+    if token is None:
+        return None
+    try:
+        return await get_current_user(token=token, user_repo=user_repo)
+    except AuthenticationError:
+        return None

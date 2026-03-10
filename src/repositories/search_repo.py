@@ -19,9 +19,14 @@ class SearchRepository:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
-    async def create_session(self, request: SearchRequest) -> SearchSession:
+    async def create_session(
+        self,
+        request: SearchRequest,
+        user_id: UUID | None = None,
+    ) -> SearchSession:
         """Create a processing search session for a new request."""
         session = SearchSession(
+            user_id=user_id,
             query=request.query,
             query_type=request.query_type.value,
             search_mode=request.search_mode.value,
@@ -36,6 +41,23 @@ class SearchRepository:
         await self.db.commit()
         await self.db.refresh(session)
         return session
+
+    async def list_user_sessions(
+        self,
+        user_id: UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[SearchSession]:
+        """List search sessions belonging to a user, newest first."""
+        stmt = (
+            select(SearchSession)
+            .where(SearchSession.user_id == user_id)
+            .order_by(SearchSession.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
 
     async def update_session(self, session: SearchSession) -> None:
         """Persist updates to an existing search session."""

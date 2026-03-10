@@ -9,9 +9,11 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.core.exceptions import (
+    AuthenticationError,
     DeduplicationError,
     EnrichmentError,
     LitBridgeError,
+    OTPError,
     RateLimitError,
     SearchNotFoundError,
     SourceFetchError,
@@ -79,6 +81,12 @@ async def domain_exception_handler(request: Request, exc: LitBridgeError) -> JSO
             "retry_after": exc.retry_after,
             "request_id": request_id,
         }
+    elif isinstance(exc, AuthenticationError):
+        status_code = 401
+        payload = {"detail": exc.message, "request_id": request_id}
+    elif isinstance(exc, OTPError):
+        status_code = 400
+        payload = {"detail": exc.message, "request_id": request_id}
     elif isinstance(exc, (DeduplicationError, EnrichmentError)):
         status_code = 500
         payload = {"detail": exc.message, "request_id": request_id}

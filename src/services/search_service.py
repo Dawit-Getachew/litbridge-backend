@@ -43,9 +43,15 @@ class SearchService:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.logger = structlog.get_logger(__name__).bind(service="search_service")
 
-    async def execute_search(self, request: SearchRequest) -> SearchResponse:
+    async def execute_search(
+        self,
+        request: SearchRequest,
+        user_id: str | None = None,
+    ) -> SearchResponse:
         """Run A->B->C fast path and persist the resulting session data."""
-        session = await self.search_repo.create_session(request)
+        from uuid import UUID as _UUID
+        uid = _UUID(user_id) if user_id else None
+        session = await self.search_repo.create_session(request, user_id=uid)
         selected_sources = request.sources or list(SourceType)
 
         try:

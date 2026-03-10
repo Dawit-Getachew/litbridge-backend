@@ -44,3 +44,11 @@ class RateLimitError(LitBridgeError):
         self.retry_after = retry_after
         detail = message or f"Rate limited by '{source}'"
         super().__init__(detail)
+
+
+class AuthenticationError(LitBridgeError):
+    """Raised when authentication fails (invalid token, inactive user, etc.)."""
+
+
+class OTPError(LitBridgeError):
+    """Raised when OTP verification fails (expired, wrong code, too many attempts)."""

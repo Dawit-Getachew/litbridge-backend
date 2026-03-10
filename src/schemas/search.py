@@ -17,6 +17,7 @@ class SearchRequest(BaseModel):
     sources: list[SourceType] | None = None
     pico: PICOInput | None = None
     max_results: int = Field(default=100, ge=1, le=5000)
+    workflow: bool = False
 
     @model_validator(mode="after")
     def validate_and_normalize(self) -> Self:

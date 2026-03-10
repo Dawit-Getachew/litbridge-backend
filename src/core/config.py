@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     CHAT_MAX_HISTORY_TURNS: int = 10
     CHAT_MAX_CONTEXT_RECORDS: int = 25
 
+    SENDGRID_API_KEY: str = ""
+    SENDGRID_FROM_EMAIL: str = ""
+    SENDGRID_FROM_NAME: str = "LitBridge"
+    ADMIN_EMAIL: str = ""
+
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    OTP_EXPIRE_SECONDS: int = 300
+    OTP_MAX_ATTEMPTS: int = 5
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS_ORIGINS from string to list. Accepts '*', JSON array, or comma-separated."""

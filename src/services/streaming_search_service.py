@@ -61,9 +61,12 @@ class StreamingSearchService:
     async def execute_search_stream(
         self,
         request: SearchRequest,
+        user_id: str | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Run federated search and yield granular progress updates as SSE events."""
-        session = await self.search_repo.create_session(request)
+        from uuid import UUID as _UUID
+        uid = _UUID(user_id) if user_id else None
+        session = await self.search_repo.create_session(request, user_id=uid)
         search_id = str(session.id)
         selected_sources = request.sources or list(SourceType)
 

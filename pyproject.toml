@@ -20,6 +20,8 @@ dependencies = [
     "langchain-core",
     "langchain-openai",
     "python-dotenv",
+    "pyjwt[crypto]",
+    "email-validator",
 ]
 
 [dependency-groups]

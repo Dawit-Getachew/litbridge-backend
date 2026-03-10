@@ -5,8 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from redis.asyncio import Redis
 
-from src.core.deps import get_enrichment_service, get_oa_service, get_redis, get_search_repo
+from src.core.deps import get_current_user_optional, get_enrichment_service, get_oa_service, get_redis, get_search_repo
 from src.core.exceptions import SearchNotFoundError
+from src.models.user import User
 from src.core.redis import build_cache_key
 from src.repositories.search_repo import SearchRepository
 from src.schemas.enrichment import EnrichmentResponse
@@ -38,6 +39,7 @@ async def get_enrichment(
     enrichment_service: EnrichmentService = Depends(get_enrichment_service),
     oa_service: OAService = Depends(get_oa_service),
     redis_client: Redis = Depends(get_redis),
+    user: User | None = Depends(get_current_user_optional),
 ) -> EnrichmentResponse:
     """Return enrichment payload for one search result record."""
     session = await search_repo.get_session(search_id)

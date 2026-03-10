@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from uuid import UUID as PyUUID
 
-from sqlalchemy import DateTime, Index, Integer, JSON, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base
+
+if TYPE_CHECKING:
+    from src.models.user import User
 
 
 class SearchSession(Base):
@@ -16,6 +21,12 @@ class SearchSession(Base):
 
     __tablename__ = "search_sessions"
 
+    user_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     query: Mapped[str] = mapped_column(String, nullable=False)
     query_type: Mapped[str] = mapped_column(String(32), nullable=False)
     search_mode: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -28,6 +39,8 @@ class SearchSession(Base):
     sources_completed: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     sources_failed: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User | None] = relationship("User", back_populates="search_sessions")
 
 
 Index(
