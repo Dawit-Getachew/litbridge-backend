@@ -13,7 +13,14 @@ def create_engine() -> AsyncEngine:
     """Create an async SQLAlchemy engine from application settings."""
 
     settings = get_settings()
-    return create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+    return create_async_engine(
+        settings.DATABASE_URL,
+        echo=settings.DEBUG,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=5,
+        max_overflow=10,
+    )
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

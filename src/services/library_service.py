@@ -92,7 +92,9 @@ class LibraryService:
         lib: Library,
         item_count: int,
         children_counts: dict[UUID, int],
+        children: list[Library] | None = None,
     ) -> LibraryDetailResponse:
+        children_list = children if children is not None else (lib.children or [])
         return LibraryDetailResponse(
             id=lib.id,
             name=lib.name,
@@ -116,7 +118,7 @@ class LibraryService:
             ],
             children=[
                 self._to_response(ch, children_counts.get(ch.id, 0))
-                for ch in (lib.children or [])
+                for ch in children_list
             ],
         )
 
@@ -134,8 +136,10 @@ class LibraryService:
 
         tree: list[LibraryDetailResponse] = []
         for root in roots:
-            root.children = children_map.get(root.id, [])
-            tree.append(self._to_detail(root, counts.get(root.id, 0), counts))
+            root_children = children_map.get(root.id, [])
+            tree.append(self._to_detail(
+                root, counts.get(root.id, 0), counts, children=root_children,
+            ))
 
         return LibraryTreeResponse(libraries=tree)
 
@@ -168,8 +172,8 @@ class LibraryService:
         lib = await self._get_owned_library(library_id, user_id)
         counts = await self.library_repo.count_items_per_library(user_id)
         all_libs = await self.library_repo.list_user_libraries(user_id)
-        lib.children = [ch for ch in all_libs if ch.parent_id == library_id]
-        return self._to_detail(lib, counts.get(lib.id, 0), counts)
+        children = [ch for ch in all_libs if ch.parent_id == library_id]
+        return self._to_detail(lib, counts.get(lib.id, 0), counts, children=children)
 
     async def update_library(
         self,

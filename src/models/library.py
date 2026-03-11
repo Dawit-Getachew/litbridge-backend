@@ -45,6 +45,7 @@ class Library(Base):
     )
     children: Mapped[list[Library]] = relationship(
         "Library", back_populates="parent", cascade="all, delete-orphan",
+        lazy="selectin",
     )
     items: Mapped[list[LibraryItem]] = relationship(
         back_populates="library", cascade="all, delete-orphan", lazy="selectin",
