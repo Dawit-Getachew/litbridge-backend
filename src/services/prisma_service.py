@@ -59,4 +59,30 @@ class PrismaService:
         if filters.open_access_only:
             filtered = [record for record in filtered if record.oa_status is OAStatus.OPEN]
 
+        if filters.age_groups:
+            allowed_groups = set(filters.age_groups)
+            filtered = [
+                record for record in filtered
+                if set(record.age_groups) & allowed_groups
+            ]
+
+        if filters.age_min is not None:
+            filtered = [
+                record for record in filtered
+                if record.age_max is None or record.age_max >= filters.age_min
+            ]
+
+        if filters.age_max is not None:
+            filtered = [
+                record for record in filtered
+                if record.age_min is None or record.age_min <= filters.age_max
+            ]
+
+        if filters.study_types:
+            allowed_types = set(filters.study_types)
+            filtered = [
+                record for record in filtered
+                if record.study_type is not None and record.study_type in allowed_types
+            ]
+
         return filtered

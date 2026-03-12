@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.schemas.enums import OAStatus, SourceType
+from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyType
 
 
 class UnifiedRecord(BaseModel):
@@ -26,6 +26,10 @@ class UnifiedRecord(BaseModel):
     abstract: str | None = None
     duplicate_cluster_id: str | None = None
     prisma_stage: str | None = None
+    age_groups: list[AgeGroup] = Field(default_factory=list)
+    age_min: int | None = None
+    age_max: int | None = None
+    study_type: StudyType | None = None
 
 
 class PaginatedResults(BaseModel):

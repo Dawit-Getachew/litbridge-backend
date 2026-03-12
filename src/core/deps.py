@@ -24,6 +24,7 @@ from src.repositories.europepmc_repo import EuropePMCRepository
 from src.repositories.openalex_repo import OpenAlexRepository
 from src.repositories.semantic_scholar_repo import SemanticScholarRepository
 from src.repositories.library_repo import LibraryRepository
+from src.repositories.research_collection_repo import ResearchCollectionRepository
 from src.repositories.search_repo import SearchRepository
 from src.repositories.unpaywall_repo import UnpaywallRepository
 from src.repositories.user_repo import UserRepository
@@ -36,6 +37,7 @@ from src.services.enrichment_service import EnrichmentService
 from src.services.oa_service import OAService
 from src.services.prisma_service import PrismaService
 from src.services.library_service import LibraryService
+from src.services.research_collection_service import ResearchCollectionService
 from src.services.search_service import SearchService
 from src.services.streaming_search_service import StreamingSearchService
 
@@ -234,6 +236,24 @@ async def get_library_service(
     """Return the library/collections service."""
 
     return LibraryService(library_repo=library_repo, search_repo=search_repo)
+
+
+# ── Research Collection dependencies ─────────────────────────────
+
+async def get_research_collection_repo(
+    db: AsyncSession = Depends(get_db),
+) -> ResearchCollectionRepository:
+    """Return research collection repository bound to current DB session."""
+
+    return ResearchCollectionRepository(db=db)
+
+
+async def get_research_collection_service(
+    repo: ResearchCollectionRepository = Depends(get_research_collection_repo),
+) -> ResearchCollectionService:
+    """Return the research collections service."""
+
+    return ResearchCollectionService(repo=repo)
 
 
 # ── Auth dependencies ────────────────────────────────────────────

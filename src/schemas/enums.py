@@ -37,3 +37,21 @@ class SearchMode(str, Enum):
     DEEP_ANALYZE = "deep_analyze"
     DEEP_THINKING = "deep_thinking"
     LIGHT_THINKING = "light_thinking"
+
+
+class AgeGroup(str, Enum):
+    """Standardised age-group categories aligned with ClinicalTrials.gov."""
+
+    CHILD = "child"
+    ADULT = "adult"
+    OLDER_ADULT = "older_adult"
+
+
+class StudyType(str, Enum):
+    """Publication / trial study-design classification."""
+
+    INTERVENTIONAL = "interventional"
+    OBSERVATIONAL = "observational"
+    EXPANDED_ACCESS = "expanded_access"
+    DIAGNOSTIC = "diagnostic"
+    OTHER = "other"

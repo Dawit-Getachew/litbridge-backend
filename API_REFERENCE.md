@@ -343,6 +343,28 @@ Controls search depth and AI processing.
 | `deep_thinking` | 5000 | Yes | Yes (comprehensive) | Enrichment + streamed AI synthesis |
 | `light_thinking` | 100 | No | Yes (concise) | Quick search + short streamed AI paragraph |
 
+### AgeGroup
+
+Standardised age-group categories (aligned with ClinicalTrials.gov `stdAges`).
+
+| Value | Description |
+|---|---|
+| `child` | Pediatric / paediatric population (typically 0–17 years) |
+| `adult` | Adult population (typically 18–64 years) |
+| `older_adult` | Geriatric / elderly population (typically 65+ years) |
+
+### StudyType
+
+Publication or trial study-design classification.
+
+| Value | Description |
+|---|---|
+| `interventional` | Randomized controlled trials, clinical trials, phase studies |
+| `observational` | Cohort, case-control, cross-sectional, registry studies |
+| `expanded_access` | Expanded / compassionate access programs |
+| `diagnostic` | Diagnostic accuracy, screening, biomarker validation studies |
+| `other` | Reviews, editorials, letters, datasets, books, or unclassified |
+
 ---
 
 ## Search Endpoints
@@ -523,7 +545,11 @@ Retrieve one page of deduplicated search results.
       "pdf_url": "https://europepmc.org/articles/PMC1234567?pdf=render",
       "abstract": "Background: Metformin has shown...",
       "duplicate_cluster_id": "clust-abc",
-      "prisma_stage": "screened"
+      "prisma_stage": "screened",
+      "age_groups": ["adult"],
+      "age_min": 18,
+      "age_max": 65,
+      "study_type": "interventional"
     }
   ],
   "next_cursor": "eyJvZmZzZXQiOiA1MH0="
@@ -1157,7 +1183,7 @@ Get AI enrichment for a single record: TLDR summary, citation count, OA status, 
 
 ### GET `/api/v1/prisma/{search_id}`
 
-Compute PRISMA systematic review flow diagram counts for a completed search.
+Compute PRISMA systematic review flow diagram counts for a completed search. All filters are optional and additive (AND logic) — each active filter narrows the set further.
 
 **Path Parameters:**
 
@@ -1173,6 +1199,41 @@ Compute PRISMA systematic review flow diagram counts for a completed search.
 | `year_to` | integer \| null | null | Maximum publication year |
 | `sources` | string \| null | null | Comma-separated source names, e.g. `pubmed,openalex` |
 | `open_access_only` | boolean | false | Only count open-access records |
+| `age_group` | string \| null | null | Comma-separated age groups, e.g. `adult,older_adult`. Values: `child`, `adult`, `older_adult` (see [AgeGroup](#agegroup)) |
+| `age_min` | integer \| null | null | Minimum age in years (inclusive). Records whose age range overlaps are included |
+| `age_max` | integer \| null | null | Maximum age in years (inclusive). Records whose age range overlaps are included |
+| `study_type` | string \| null | null | Comma-separated study types, e.g. `interventional,observational`. Values: `interventional`, `observational`, `expanded_access`, `diagnostic`, `other` (see [StudyType](#studytype)) |
+
+**Filter behavior:**
+
+- **`age_group`** — A record passes if **any** of its `age_groups` overlaps with the requested set. Records with no age-group data are excluded when this filter is active.
+- **`age_min` / `age_max`** — Uses **inclusive range overlap**: a record passes if its age range intersects `[age_min, age_max]`. If a record has no age bounds, it is kept (not excluded) so that records without age metadata are not silently dropped.
+- **`study_type`** — A record passes if its `study_type` is in the requested set. Records with no study type are excluded when this filter is active.
+- All filters combine with AND logic — a record must satisfy every active filter to be counted.
+
+**Example — no filters (baseline):**
+
+```
+GET /api/v1/prisma/abc-123
+```
+
+**Example — adults-only interventional studies from 2020+:**
+
+```
+GET /api/v1/prisma/abc-123?year_from=2020&age_group=adult&study_type=interventional
+```
+
+**Example — pediatric and adult studies with age range 5–30:**
+
+```
+GET /api/v1/prisma/abc-123?age_group=child,adult&age_min=5&age_max=30
+```
+
+**Example — multiple study types:**
+
+```
+GET /api/v1/prisma/abc-123?study_type=interventional,observational,diagnostic
+```
 
 **Response:** `PrismaCounts`
 
@@ -1186,7 +1247,12 @@ Compute PRISMA systematic review flow diagram counts for a completed search.
 }
 ```
 
-**Errors:** `404`, `422` (invalid source name)
+**Errors:**
+
+| Status | Cause |
+|---|---|
+| `404` | Search session not found |
+| `422` | Invalid value in `sources`, `age_group`, or `study_type` parameter |
 
 ---
 
@@ -1770,6 +1836,10 @@ For `422` validation errors, FastAPI returns a structured error:
 | `abstract` | string \| null | null | Full abstract text |
 | `duplicate_cluster_id` | string \| null | null | Cluster ID for dedup tracking |
 | `prisma_stage` | string \| null | null | PRISMA flow stage |
+| `age_groups` | [AgeGroup](#agegroup)[] | `[]` | Applicable age categories. Extracted from ClinicalTrials.gov structured data or inferred from title/abstract heuristics |
+| `age_min` | integer \| null | null | Minimum eligible age in years. From ClinicalTrials.gov `eligibilityModule.minimumAge` when available |
+| `age_max` | integer \| null | null | Maximum eligible age in years. From ClinicalTrials.gov `eligibilityModule.maximumAge` when available |
+| `study_type` | [StudyType](#studytype) \| null | null | Study design classification. Extracted from ClinicalTrials.gov `studyType`, OpenAlex `type`, or inferred via title/abstract heuristics |
 
 ### TokenResponse
 

@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 
-from src.schemas.enums import SourceType
+from src.schemas.enums import AgeGroup, SourceType, StudyType
 
 
 class PrismaFilters(BaseModel):
@@ -12,6 +12,10 @@ class PrismaFilters(BaseModel):
     year_to: int | None = None
     sources: list[SourceType] | None = None
     open_access_only: bool = False
+    age_groups: list[AgeGroup] | None = None
+    age_min: int | None = None
+    age_max: int | None = None
+    study_types: list[StudyType] | None = None
 
 
 class PrismaCounts(BaseModel):

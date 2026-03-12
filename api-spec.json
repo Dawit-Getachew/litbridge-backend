@@ -21,6 +21,14 @@
       "description": "How the query string should be interpreted.",
       "values": ["free", "structured", "boolean", "abstract"]
     },
+    "AgeGroup": {
+      "description": "Standardised age-group categories aligned with ClinicalTrials.gov.",
+      "values": ["child", "adult", "older_adult"]
+    },
+    "StudyType": {
+      "description": "Publication or trial study-design classification.",
+      "values": ["interventional", "observational", "expanded_access", "diagnostic", "other"]
+    },
     "SearchMode": {
       "description": "Search depth and AI analysis mode.",
       "values": ["quick", "deep_research", "deep_analyze", "deep_thinking", "light_thinking"],
@@ -123,7 +131,11 @@
         "pdf_url":              { "type": "string | null", "default": null },
         "abstract":             { "type": "string | null", "default": null },
         "duplicate_cluster_id": { "type": "string | null", "default": null },
-        "prisma_stage":         { "type": "string | null", "default": null }
+        "prisma_stage":         { "type": "string | null", "default": null },
+        "age_groups":           { "type": "AgeGroup[]", "default": [], "description": "Applicable age categories (child, adult, older_adult)." },
+        "age_min":              { "type": "integer | null", "default": null, "description": "Minimum eligible age in years." },
+        "age_max":              { "type": "integer | null", "default": null, "description": "Maximum eligible age in years." },
+        "study_type":           { "type": "StudyType | null", "default": null, "description": "Study design classification." }
       }
     },
     "PaginatedResults": {
@@ -198,6 +210,94 @@
       "fields": {
         "conversation": { "type": "ConversationResponse" },
         "messages":     { "type": "MessageResponse[]" }
+      }
+    },
+
+    "CreateCollectionRequest": {
+      "description": "Request body for creating a new research collection.",
+      "fields": {
+        "name":        { "type": "string", "required": true, "min_length": 1, "max_length": 255, "description": "Display name for the collection." },
+        "description": { "type": "string | null", "default": null, "description": "Optional longer description." },
+        "icon":        { "type": "string | null", "default": null, "max_length": 64, "description": "Icon identifier (e.g. emoji or icon name)." },
+        "color":       { "type": "string | null", "default": null, "max_length": 32, "description": "Hex color or color name for UI." }
+      }
+    },
+    "UpdateCollectionRequest": {
+      "description": "Request body for updating a research collection. All fields are optional; only provided fields are changed.",
+      "fields": {
+        "name":        { "type": "string | null", "default": null, "min_length": 1, "max_length": 255 },
+        "description": { "type": "string | null", "default": null },
+        "icon":        { "type": "string | null", "default": null, "max_length": 64 },
+        "color":       { "type": "string | null", "default": null, "max_length": 32 },
+        "position":    { "type": "integer | null", "default": null, "description": "Sort order among the user's collections." }
+      }
+    },
+    "AddRecordItem": {
+      "description": "A single record to add to a collection.",
+      "fields": {
+        "record_id":          { "type": "string", "required": true, "min_length": 1, "description": "The UnifiedRecord.id value (e.g. 'pubmed_12345')." },
+        "search_session_id":  { "type": "string (UUID)", "required": true, "description": "UUID of the search session the record belongs to." },
+        "title":              { "type": "string | null", "default": null, "max_length": 512, "description": "Snapshot of the record title for quick display." },
+        "notes":              { "type": "string | null", "default": null, "description": "User notes about this record." }
+      }
+    },
+    "AddRecordsRequest": {
+      "description": "Request body for adding one or more records to a collection.",
+      "fields": {
+        "records": { "type": "AddRecordItem[]", "required": true, "min_length": 1, "description": "Array of records to add. Duplicates (same record_id already in collection) are silently skipped." }
+      }
+    },
+    "MoveRecordRequest": {
+      "description": "Request body for moving a record from one collection to another.",
+      "fields": {
+        "target_collection_id": { "type": "string (UUID)", "required": true, "description": "UUID of the destination collection. Must be owned by the same user." }
+      }
+    },
+    "CollectionItemResponse": {
+      "description": "A single record within a research collection.",
+      "fields": {
+        "id":                 { "type": "string (UUID)", "description": "Item UUID." },
+        "collection_id":     { "type": "string (UUID)", "description": "Parent collection UUID." },
+        "record_id":         { "type": "string", "description": "The UnifiedRecord.id value." },
+        "search_session_id": { "type": "string (UUID)", "description": "Origin search session for resolving full record data." },
+        "title":             { "type": "string | null", "description": "Title snapshot set at add-time." },
+        "notes":             { "type": "string | null", "description": "User notes." },
+        "created_at":        { "type": "datetime (ISO 8601)" }
+      }
+    },
+    "CollectionResponse": {
+      "description": "Research collection summary (items not inlined).",
+      "fields": {
+        "id":          { "type": "string (UUID)" },
+        "name":        { "type": "string" },
+        "description": { "type": "string | null" },
+        "icon":        { "type": "string | null" },
+        "color":       { "type": "string | null" },
+        "position":    { "type": "integer", "description": "Sort order." },
+        "item_count":  { "type": "integer", "default": 0, "description": "Number of records in this collection." },
+        "created_at":  { "type": "datetime (ISO 8601)" },
+        "updated_at":  { "type": "datetime (ISO 8601)" }
+      }
+    },
+    "CollectionDetailResponse": {
+      "description": "Research collection with its record items inlined. Extends CollectionResponse.",
+      "fields": {
+        "id":          { "type": "string (UUID)" },
+        "name":        { "type": "string" },
+        "description": { "type": "string | null" },
+        "icon":        { "type": "string | null" },
+        "color":       { "type": "string | null" },
+        "position":    { "type": "integer" },
+        "item_count":  { "type": "integer", "default": 0 },
+        "created_at":  { "type": "datetime (ISO 8601)" },
+        "updated_at":  { "type": "datetime (ISO 8601)" },
+        "items":       { "type": "CollectionItemResponse[]", "default": [], "description": "All records in this collection." }
+      }
+    },
+    "CollectionListResponse": {
+      "description": "Top-level list of research collections returned from GET /collections.",
+      "fields": {
+        "collections": { "type": "CollectionResponse[]", "description": "All collections owned by the authenticated user, ordered by position." }
       }
     }
   },
@@ -327,7 +427,11 @@
           "year_from":        { "type": "integer | null", "default": null, "description": "Filter: minimum publication year." },
           "year_to":          { "type": "integer | null", "default": null, "description": "Filter: maximum publication year." },
           "sources":          { "type": "string | null", "default": null, "description": "Comma-separated source names, e.g. 'pubmed,openalex'." },
-          "open_access_only": { "type": "boolean", "default": false, "description": "If true, only count open-access records." }
+          "open_access_only": { "type": "boolean", "default": false, "description": "If true, only count open-access records." },
+          "age_group":        { "type": "string | null", "default": null, "description": "Comma-separated age group categories, e.g. 'adult,older_adult'. Values: child, adult, older_adult." },
+          "age_min":          { "type": "integer | null", "default": null, "description": "Filter: minimum age in years (inclusive overlap with record range)." },
+          "age_max":          { "type": "integer | null", "default": null, "description": "Filter: maximum age in years (inclusive overlap with record range)." },
+          "study_type":       { "type": "string | null", "default": null, "description": "Comma-separated study types, e.g. 'interventional,observational'. Values: interventional, observational, expanded_access, diagnostic, other." }
         },
         "response": { "$ref": "#/schemas/PrismaCounts" },
         "errors": {
@@ -380,6 +484,123 @@
         "response": {
           "type": "ConversationResponse[]",
           "description": "Array of conversations, newest first. Empty array if none."
+        }
+      }
+    ],
+
+    "research_collections": [
+      {
+        "method": "GET",
+        "path": "/api/v1/collections",
+        "description": "List all research collections for the authenticated user, with item counts.",
+        "auth": "Bearer token (required)",
+        "response": { "$ref": "#/schemas/CollectionListResponse" }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/collections",
+        "description": "Create a new research collection.",
+        "auth": "Bearer token (required)",
+        "request": { "$ref": "#/schemas/CreateCollectionRequest" },
+        "response": { "$ref": "#/schemas/CollectionResponse" },
+        "status_code": 201,
+        "errors": {
+          "422": "Validation error (empty name, etc.)."
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/collections/{collection_id}",
+        "description": "Get a research collection with all its record items inlined.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)", "description": "Collection UUID." }
+        },
+        "response": { "$ref": "#/schemas/CollectionDetailResponse" },
+        "errors": {
+          "403": "User does not own this collection.",
+          "404": "Collection not found."
+        }
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/v1/collections/{collection_id}",
+        "description": "Update a research collection's name, description, icon, color, or position.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)" }
+        },
+        "request": { "$ref": "#/schemas/UpdateCollectionRequest" },
+        "response": { "$ref": "#/schemas/CollectionResponse" },
+        "errors": {
+          "403": "User does not own this collection.",
+          "404": "Collection not found."
+        }
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/collections/{collection_id}",
+        "description": "Delete a research collection and all its items.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)" }
+        },
+        "status_code": 204,
+        "errors": {
+          "403": "User does not own this collection.",
+          "404": "Collection not found."
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/collections/{collection_id}/records",
+        "description": "Add one or more records to a research collection. Records already present are silently skipped.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)" }
+        },
+        "request": { "$ref": "#/schemas/AddRecordsRequest" },
+        "response": {
+          "type": "CollectionItemResponse[]",
+          "description": "Array of newly added items (excludes duplicates that were skipped)."
+        },
+        "status_code": 201,
+        "errors": {
+          "403": "User does not own this collection.",
+          "404": "Collection not found."
+        }
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/collections/{collection_id}/records/{record_id}",
+        "description": "Remove a record from a research collection.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)" },
+          "record_id":     { "type": "string", "description": "The UnifiedRecord.id value (e.g. 'pubmed_12345')." }
+        },
+        "status_code": 204,
+        "errors": {
+          "400": "Record not found in this collection.",
+          "403": "User does not own this collection.",
+          "404": "Collection not found."
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/collections/{collection_id}/records/{record_id}/move",
+        "description": "Move a record from this collection to another collection. The record is removed from the source and added to the target atomically.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)", "description": "Source collection UUID." },
+          "record_id":     { "type": "string", "description": "The UnifiedRecord.id value." }
+        },
+        "request": { "$ref": "#/schemas/MoveRecordRequest" },
+        "response": { "$ref": "#/schemas/CollectionItemResponse" },
+        "errors": {
+          "400": "Record not found in source collection, or already exists in target collection.",
+          "403": "User does not own the source or target collection.",
+          "404": "Source or target collection not found."
         }
       }
     ]
@@ -545,7 +766,9 @@
       }
     },
     "status_codes": {
-      "404": "Resource not found (search, record, or conversation).",
+      "400": "Bad request (e.g. record not found in collection, duplicate in target).",
+      "403": "Access denied — resource exists but is not owned by the authenticated user.",
+      "404": "Resource not found (search, record, conversation, or collection).",
       "422": "Validation error (malformed request body, invalid enum values, constraint violations).",
       "429": "Rate limit exceeded. Check the Retry-After header for seconds to wait.",
       "502": "Upstream source API failure."

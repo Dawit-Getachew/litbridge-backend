@@ -14,6 +14,7 @@ from src.models.base import Base
 
 if TYPE_CHECKING:
     from src.models.library import Library
+    from src.models.research_collection import ResearchCollection
     from src.models.search import SearchSession
 
 
@@ -36,6 +37,9 @@ class User(Base):
         back_populates="user", lazy="noload",
     )
     libraries: Mapped[list[Library]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", lazy="noload",
+    )
+    research_collections: Mapped[list[ResearchCollection]] = relationship(
         back_populates="user", cascade="all, delete-orphan", lazy="noload",
     )
 

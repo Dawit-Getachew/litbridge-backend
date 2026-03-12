@@ -9,7 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 from src.core import deps
-from src.schemas.enums import OAStatus, SourceType
+from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyType
 from src.schemas.records import UnifiedRecord
 
 
@@ -48,6 +48,10 @@ def prisma_api_context(async_client: AsyncClient):
             source=SourceType.PUBMED,
             sources_found_in=[SourceType.PUBMED],
             oa_status=OAStatus.OPEN,
+            age_groups=[AgeGroup.ADULT],
+            age_min=18,
+            age_max=65,
+            study_type=StudyType.INTERVENTIONAL,
         ),
         UnifiedRecord(
             id="rec-2",
@@ -57,6 +61,10 @@ def prisma_api_context(async_client: AsyncClient):
             source=SourceType.OPENALEX,
             sources_found_in=[SourceType.OPENALEX],
             oa_status=OAStatus.CLOSED,
+            age_groups=[AgeGroup.CHILD],
+            age_min=0,
+            age_max=17,
+            study_type=StudyType.OBSERVATIONAL,
         ),
         UnifiedRecord(
             id="rec-3",
@@ -66,6 +74,10 @@ def prisma_api_context(async_client: AsyncClient):
             source=SourceType.EUROPEPMC,
             sources_found_in=[SourceType.EUROPEPMC],
             oa_status=OAStatus.OPEN,
+            age_groups=[AgeGroup.ADULT, AgeGroup.OLDER_ADULT],
+            age_min=18,
+            age_max=90,
+            study_type=StudyType.INTERVENTIONAL,
         ),
         UnifiedRecord(
             id="rec-4",
@@ -75,6 +87,10 @@ def prisma_api_context(async_client: AsyncClient):
             source=SourceType.PUBMED,
             sources_found_in=[SourceType.PUBMED],
             oa_status=OAStatus.UNKNOWN,
+            age_groups=[AgeGroup.OLDER_ADULT],
+            age_min=65,
+            age_max=100,
+            study_type=StudyType.DIAGNOSTIC,
         ),
         UnifiedRecord(
             id="rec-5",
@@ -174,6 +190,84 @@ async def test_get_prisma_with_all_filters_combined(prisma_api_context) -> None:
     assert response.status_code == 200
     assert body["excluded"] == 4
     assert body["oa_retrieved"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_prisma_with_age_group_filter(prisma_api_context) -> None:
+    client, search_id = prisma_api_context
+    response = await client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"age_group": "adult"},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["excluded"] == 3
+    assert body["oa_retrieved"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_prisma_with_age_range_filter(prisma_api_context) -> None:
+    client, search_id = prisma_api_context
+    response = await client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"age_min": 18, "age_max": 65},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["excluded"] == 1
+    assert body["oa_retrieved"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_prisma_with_study_type_filter(prisma_api_context) -> None:
+    client, search_id = prisma_api_context
+    response = await client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"study_type": "interventional"},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["excluded"] == 3
+    assert body["oa_retrieved"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_prisma_with_multiple_study_types(prisma_api_context) -> None:
+    client, search_id = prisma_api_context
+    response = await client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"study_type": "interventional,observational"},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["excluded"] == 2
+    assert body["oa_retrieved"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_prisma_with_invalid_age_group_returns_422(prisma_api_context) -> None:
+    client, search_id = prisma_api_context
+    response = await client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"age_group": "teenager"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_prisma_with_invalid_study_type_returns_422(prisma_api_context) -> None:
+    client, search_id = prisma_api_context
+    response = await client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"study_type": "invalid_type"},
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

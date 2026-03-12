@@ -86,3 +86,52 @@ async def test_prisma_counts_with_oa_filter(integration_client: AsyncClient, run
     _assert_counts_shape(filtered)
     assert filtered["oa_retrieved"] == filtered["after_deduplication"]
 
+
+@pytest.mark.asyncio
+async def test_prisma_counts_with_study_type_filter(integration_client: AsyncClient, run_search) -> None:
+    search_id, response = await run_search(query="metformin cardiovascular")
+    assert response.status_code == 200
+
+    unfiltered_response = await integration_client.get(f"/api/v1/prisma/{search_id}")
+    filtered_response = await integration_client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"study_type": "interventional"},
+    )
+    unfiltered = unfiltered_response.json()
+    filtered = filtered_response.json()
+
+    assert filtered_response.status_code == 200
+    _assert_counts_shape(filtered)
+    assert filtered["excluded"] >= unfiltered["excluded"]
+
+
+@pytest.mark.asyncio
+async def test_prisma_counts_with_age_group_filter(integration_client: AsyncClient, run_search) -> None:
+    search_id, response = await run_search(query="metformin cardiovascular")
+    assert response.status_code == 200
+
+    unfiltered_response = await integration_client.get(f"/api/v1/prisma/{search_id}")
+    filtered_response = await integration_client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"age_group": "adult"},
+    )
+    unfiltered = unfiltered_response.json()
+    filtered = filtered_response.json()
+
+    assert filtered_response.status_code == 200
+    _assert_counts_shape(filtered)
+    assert filtered["excluded"] >= unfiltered["excluded"]
+
+
+@pytest.mark.asyncio
+async def test_prisma_invalid_age_group_returns_422(integration_client: AsyncClient, run_search) -> None:
+    search_id, response = await run_search(query="metformin cardiovascular")
+    assert response.status_code == 200
+
+    filtered_response = await integration_client.get(
+        f"/api/v1/prisma/{search_id}",
+        params={"age_group": "teenager"},
+    )
+
+    assert filtered_response.status_code == 422
+

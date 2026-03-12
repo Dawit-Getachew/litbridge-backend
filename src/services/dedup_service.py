@@ -10,7 +10,7 @@ import structlog
 from rapidfuzz import fuzz
 
 from src.core.exceptions import DeduplicationError
-from src.schemas.enums import OAStatus, SourceType
+from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyType
 from src.schemas.records import RawRecord, UnifiedRecord
 
 
@@ -223,6 +223,9 @@ class DedupService:
             seen_sources.add(record.source)
             sources_found_in.append(record.source)
 
+        age_groups, age_min, age_max = self._extract_age_metadata(cluster)
+        study_type = self._extract_study_type(cluster, title, abstract)
+
         return UnifiedRecord(
             id=str(uuid4()),
             title=title,
@@ -237,7 +240,169 @@ class DedupService:
             pdf_url=pdf_url,
             abstract=abstract,
             duplicate_cluster_id=cluster_id,
+            age_groups=age_groups,
+            age_min=age_min,
+            age_max=age_max,
+            study_type=study_type,
         )
+
+    # -- ClinicalTrials.gov stdAge label -> AgeGroup mapping --
+    _CT_AGE_MAP: dict[str, AgeGroup] = {
+        "child": AgeGroup.CHILD,
+        "adult": AgeGroup.ADULT,
+        "older_adult": AgeGroup.OLDER_ADULT,
+    }
+
+    # -- OpenAlex/Crossref work-type -> StudyType mapping --
+    _OPENALEX_TYPE_MAP: dict[str, StudyType] = {
+        "clinical-trial": StudyType.INTERVENTIONAL,
+        "article": StudyType.OBSERVATIONAL,
+        "review": StudyType.OTHER,
+        "book-chapter": StudyType.OTHER,
+        "book": StudyType.OTHER,
+        "dataset": StudyType.OTHER,
+        "preprint": StudyType.OTHER,
+        "dissertation": StudyType.OTHER,
+        "editorial": StudyType.OTHER,
+        "letter": StudyType.OTHER,
+        "erratum": StudyType.OTHER,
+        "report": StudyType.OTHER,
+    }
+
+    _STUDY_TYPE_PATTERNS: list[tuple[re.Pattern[str], StudyType]] = [
+        (re.compile(r"\b(randomized|randomised|rct|controlled trial|phase [i1-4]+)\b", re.IGNORECASE), StudyType.INTERVENTIONAL),
+        (re.compile(r"\b(cohort|cross.?sectional|case.?control|longitudinal|registry|surveillance|epidemiolog|prevalence)\b", re.IGNORECASE), StudyType.OBSERVATIONAL),
+        (re.compile(r"\bexpanded access\b", re.IGNORECASE), StudyType.EXPANDED_ACCESS),
+        (re.compile(r"\b(diagnostic accuracy|sensitivity and specificity|screening test|predictive value|ROC curve|biomarker validation)\b", re.IGNORECASE), StudyType.DIAGNOSTIC),
+    ]
+
+    _AGE_PATTERNS: list[tuple[re.Pattern[str], AgeGroup]] = [
+        (re.compile(r"\b(child(?:ren)?|pediatric|paediatric|infant|neonat|adolescent|juvenile)\b", re.IGNORECASE), AgeGroup.CHILD),
+        (re.compile(r"\b(adult|grown.?up)\b", re.IGNORECASE), AgeGroup.ADULT),
+        (re.compile(r"\b(elder|elderly|geriatric|older adult|aged (?:6[5-9]|[7-9]\d|1\d\d))\b", re.IGNORECASE), AgeGroup.OLDER_ADULT),
+    ]
+
+    def _extract_age_metadata(
+        self, cluster: list[RawRecord],
+    ) -> tuple[list[AgeGroup], int | None, int | None]:
+        """Derive age groups and numeric bounds from cluster records."""
+        age_groups: set[AgeGroup] = set()
+        age_min: int | None = None
+        age_max: int | None = None
+
+        for record in cluster:
+            groups, lo, hi = self._age_from_raw(record)
+            age_groups.update(groups)
+            if lo is not None:
+                age_min = lo if age_min is None else min(age_min, lo)
+            if hi is not None:
+                age_max = hi if age_max is None else max(age_max, hi)
+
+        if not age_groups:
+            text = self._combined_text(cluster)
+            for pattern, group in self._AGE_PATTERNS:
+                if pattern.search(text):
+                    age_groups.add(group)
+
+        ordered = sorted(age_groups, key=lambda g: list(AgeGroup).index(g))
+        return ordered, age_min, age_max
+
+    def _age_from_raw(self, record: RawRecord) -> tuple[list[AgeGroup], int | None, int | None]:
+        """Extract age metadata from ClinicalTrials raw_data or return empty."""
+        raw = record.raw_data
+        if record.source is not SourceType.CLINICALTRIALS or not raw:
+            return [], None, None
+
+        protocol = raw.get("protocolSection", {})
+        if not isinstance(protocol, dict):
+            return [], None, None
+
+        eligibility = protocol.get("eligibilityModule", {})
+        if not isinstance(eligibility, dict):
+            return [], None, None
+
+        groups: list[AgeGroup] = []
+        std_ages = eligibility.get("stdAges", [])
+        if isinstance(std_ages, list):
+            for label in std_ages:
+                if isinstance(label, str):
+                    mapped = self._CT_AGE_MAP.get(label.strip().lower().replace(" ", "_"))
+                    if mapped and mapped not in groups:
+                        groups.append(mapped)
+
+        lo = self._parse_age_string(eligibility.get("minimumAge"))
+        hi = self._parse_age_string(eligibility.get("maximumAge"))
+        return groups, lo, hi
+
+    @staticmethod
+    def _parse_age_string(value: object) -> int | None:
+        """Parse ClinicalTrials age strings like '18 Years' to integer years."""
+        if not isinstance(value, str):
+            return None
+        match = re.search(r"(\d+)", value)
+        if not match:
+            return None
+        number = int(match.group(1))
+        lower = value.lower()
+        if "month" in lower:
+            return max(number // 12, 0)
+        if "day" in lower:
+            return 0
+        return number
+
+    def _extract_study_type(
+        self, cluster: list[RawRecord], title: str, abstract: str | None,
+    ) -> StudyType | None:
+        """Derive study type from structured fields or text heuristics."""
+        for record in cluster:
+            st = self._study_type_from_raw(record)
+            if st is not None:
+                return st
+
+        text = f"{title} {abstract or ''}"
+        for pattern, study_type in self._STUDY_TYPE_PATTERNS:
+            if pattern.search(text):
+                return study_type
+        return None
+
+    def _study_type_from_raw(self, record: RawRecord) -> StudyType | None:
+        """Extract study type from ClinicalTrials or OpenAlex raw_data."""
+        raw = record.raw_data
+        if not raw:
+            return None
+
+        if record.source is SourceType.CLINICALTRIALS:
+            protocol = raw.get("protocolSection", {})
+            if isinstance(protocol, dict):
+                design = protocol.get("designModule", {})
+                if isinstance(design, dict):
+                    raw_type = design.get("studyType", "")
+                    if isinstance(raw_type, str):
+                        mapped = raw_type.strip().lower().replace(" ", "_")
+                        try:
+                            return StudyType(mapped)
+                        except ValueError:
+                            if mapped:
+                                return StudyType.OTHER
+            return None
+
+        if record.source is SourceType.OPENALEX:
+            work_type = raw.get("type", "")
+            if isinstance(work_type, str) and work_type.strip():
+                return self._OPENALEX_TYPE_MAP.get(work_type.strip().lower())
+
+        return None
+
+    @staticmethod
+    def _combined_text(cluster: list[RawRecord]) -> str:
+        """Concatenate title + abstract from all cluster records for heuristic matching."""
+        parts: list[str] = []
+        for record in cluster:
+            if record.title:
+                parts.append(record.title)
+            if record.abstract:
+                parts.append(record.abstract)
+        return " ".join(parts)
 
     @staticmethod
     def _normalize_doi(doi: str | None) -> str | None:
