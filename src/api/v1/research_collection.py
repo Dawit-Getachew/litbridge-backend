@@ -2,30 +2,67 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+import structlog
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
-from src.core.deps import get_current_user, get_research_collection_service
+from src.ai.llm_client import LLMClient
+from src.core.deps import (
+    get_current_user,
+    get_llm_client,
+    get_paper_extraction_service,
+    get_research_collection_service,
+)
 from src.core.exceptions import LitBridgeError
 from src.models.user import User
+from src.repositories.research_collection_repo import ResearchCollectionRepository
+from src.repositories.search_repo import SearchRepository
 from src.schemas.research_collection import (
     AddRecordsRequest,
     CollectionDetailResponse,
     CollectionItemResponse,
-    CollectionListResponse,
     CollectionResponse,
+    CollectionTreeResponse,
     CreateCollectionRequest,
     MoveRecordRequest,
+    PaperMetadata,
     UpdateCollectionRequest,
 )
+from src.services.paper_extraction_service import PaperExtractionService
 from src.services.research_collection_service import (
     CollectionAccessDeniedError,
+    CollectionNestingError,
     CollectionNotFoundError,
     ResearchCollectionService,
 )
 
+logger = structlog.get_logger(__name__)
+
 router = APIRouter(prefix="/collections", tags=["Research Collections"])
+
+
+async def _run_extraction_background(
+    items: list[dict[str, Any]],
+    session_factory: Any,
+    llm_client: LLMClient,
+    redis_client: Any,
+) -> None:
+    """Run paper metadata extraction in a background task with its own DB session."""
+    async with session_factory() as session:
+        repo = ResearchCollectionRepository(db=session)
+        search_repo = SearchRepository(db=session)
+        svc = PaperExtractionService(
+            llm_client=llm_client,
+            redis_client=redis_client,
+            repo=repo,
+            search_repo=search_repo,
+        )
+        try:
+            await svc.extract_batch(items)
+        except Exception as exc:
+            logger.warning("background_extraction_failed", error=str(exc))
 
 
 def _map_collection_error(exc: LitBridgeError) -> HTTPException:
@@ -33,17 +70,19 @@ def _map_collection_error(exc: LitBridgeError) -> HTTPException:
         return HTTPException(status_code=404, detail=exc.message)
     if isinstance(exc, CollectionAccessDeniedError):
         return HTTPException(status_code=403, detail=exc.message)
+    if isinstance(exc, CollectionNestingError):
+        return HTTPException(status_code=422, detail=exc.message)
     return HTTPException(status_code=400, detail=exc.message)
 
 
 # -- Collection CRUD ----------------------------------------------------------
 
-@router.get("", response_model=CollectionListResponse)
+@router.get("", response_model=CollectionTreeResponse)
 async def list_collections(
     user: User = Depends(get_current_user),
     service: ResearchCollectionService = Depends(get_research_collection_service),
-) -> CollectionListResponse:
-    """Return all research collections for the authenticated user."""
+) -> CollectionTreeResponse:
+    """Return tree of root collections with nested children and items."""
 
     return await service.list_collections(user.id)
 
@@ -112,15 +151,40 @@ async def delete_collection(
 async def add_records(
     collection_id: UUID,
     payload: AddRecordsRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     service: ResearchCollectionService = Depends(get_research_collection_service),
+    llm: LLMClient = Depends(get_llm_client),
 ) -> list[CollectionItemResponse]:
-    """Add one or more records to a research collection."""
+    """Add one or more records to a research collection.
 
+    AI metadata extraction runs in the background with its own DB session.
+    """
     try:
-        return await service.add_records(collection_id, user.id, payload)
+        items = await service.add_records(collection_id, user.id, payload)
     except LitBridgeError as exc:
         raise _map_collection_error(exc) from exc
+
+    extraction_items = [
+        {
+            "item_id": item.id,
+            "title": item.title or "",
+            "record_id": item.record_id,
+            "search_session_id": item.search_session_id,
+        }
+        for item in items
+    ]
+    if extraction_items:
+        background_tasks.add_task(
+            _run_extraction_background,
+            extraction_items,
+            request.app.state.db_session_factory,
+            llm,
+            request.app.state.redis,
+        )
+
+    return items
 
 
 @router.delete("/{collection_id}/records/{record_id}", status_code=204)
@@ -157,3 +221,37 @@ async def move_record(
         )
     except LitBridgeError as exc:
         raise _map_collection_error(exc) from exc
+
+
+@router.post(
+    "/{collection_id}/records/{record_id}/extract",
+    response_model=PaperMetadata,
+)
+async def extract_record_metadata(
+    collection_id: UUID,
+    record_id: str,
+    user: User = Depends(get_current_user),
+    service: ResearchCollectionService = Depends(get_research_collection_service),
+    extraction: PaperExtractionService = Depends(get_paper_extraction_service),
+) -> PaperMetadata:
+    """Manually trigger AI metadata extraction (or re-extraction) for a record."""
+
+    try:
+        collection = await service.get_collection(collection_id, user.id)
+    except LitBridgeError as exc:
+        raise _map_collection_error(exc) from exc
+
+    item = next(
+        (it for it in collection.items if it.record_id == record_id),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Record not found in this collection")
+
+    return await extraction.extract_and_persist(
+        item_id=item.id,
+        title=item.title or "",
+        abstract=None,
+        record_id=record_id,
+        search_session_id=item.search_session_id,
+    )

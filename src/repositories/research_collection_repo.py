@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -27,6 +29,7 @@ class ResearchCollectionRepository:
         icon: str | None = None,
         color: str | None = None,
         position: int = 0,
+        parent_id: UUID | None = None,
     ) -> ResearchCollection:
         collection = ResearchCollection(
             user_id=user_id,
@@ -35,6 +38,7 @@ class ResearchCollectionRepository:
             icon=icon,
             color=color,
             position=position,
+            parent_id=parent_id,
         )
         self.db.add(collection)
         await self.db.commit()
@@ -78,7 +82,8 @@ class ResearchCollectionRepository:
         search_session_id: UUID,
         title: str | None = None,
         notes: str | None = None,
-    ) -> ResearchCollectionItem:
+    ) -> ResearchCollectionItem | None:
+        """Add a record to a collection. Returns None if already present (race-safe)."""
         item = ResearchCollectionItem(
             collection_id=collection_id,
             record_id=record_id,
@@ -87,7 +92,11 @@ class ResearchCollectionRepository:
             notes=notes,
         )
         self.db.add(item)
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            return None
         await self.db.refresh(item)
         return item
 
@@ -129,6 +138,7 @@ class ResearchCollectionRepository:
         search_session_id = item.search_session_id
         title = item.title
         notes = item.notes
+        metadata = item.metadata_extracted
 
         stmt = delete(ResearchCollectionItem).where(
             ResearchCollectionItem.collection_id == source_collection_id,
@@ -142,6 +152,7 @@ class ResearchCollectionRepository:
             search_session_id=search_session_id,
             title=title,
             notes=notes,
+            metadata_extracted=metadata,
         )
         self.db.add(new_item)
         await self.db.commit()
@@ -178,3 +189,75 @@ class ResearchCollectionRepository:
         )
         result = await self.db.execute(stmt)
         return {row[0]: row[1] for row in result.all()}
+
+    # -- Tree / hierarchy queries ---------------------------------------------
+
+    async def get_root_collections(self, user_id: UUID) -> list[ResearchCollection]:
+        """Return top-level (parentless) collections with children eagerly loaded."""
+        stmt = (
+            select(ResearchCollection)
+            .where(
+                ResearchCollection.user_id == user_id,
+                ResearchCollection.parent_id.is_(None),
+            )
+            .order_by(ResearchCollection.position, ResearchCollection.created_at)
+            .options(
+                selectinload(ResearchCollection.items),
+                selectinload(ResearchCollection.children)
+                .selectinload(ResearchCollection.items),
+            )
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_with_children(self, collection_id: UUID) -> ResearchCollection | None:
+        """Fetch a collection with its children and all items eagerly loaded."""
+        stmt = (
+            select(ResearchCollection)
+            .where(ResearchCollection.id == collection_id)
+            .options(
+                selectinload(ResearchCollection.items),
+                selectinload(ResearchCollection.children)
+                .selectinload(ResearchCollection.items),
+            )
+        )
+        return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def get_nesting_depth(self, collection_id: UUID, *, max_walk: int = 10) -> int:
+        """Walk parent chain to compute current depth. Root = 0, child = 1, etc."""
+        depth = 0
+        current_id = collection_id
+        seen: set[UUID] = set()
+        while current_id is not None:
+            if current_id in seen or depth > max_walk:
+                break
+            seen.add(current_id)
+            stmt = select(ResearchCollection.parent_id).where(
+                ResearchCollection.id == current_id,
+            )
+            parent_id = (await self.db.execute(stmt)).scalar_one_or_none()
+            if parent_id is None:
+                break
+            depth += 1
+            current_id = parent_id
+        return depth
+
+    # -- Item metadata --------------------------------------------------------
+
+    async def update_item_metadata(
+        self, item_id: UUID, metadata: dict[str, Any],
+    ) -> None:
+        """Persist AI-extracted metadata on a collection item."""
+        stmt = (
+            update(ResearchCollectionItem)
+            .where(ResearchCollectionItem.id == item_id)
+            .values(metadata_extracted=metadata)
+        )
+        await self.db.execute(stmt)
+        await self.db.commit()
+
+    async def get_item_by_id(self, item_id: UUID) -> ResearchCollectionItem | None:
+        stmt = select(ResearchCollectionItem).where(
+            ResearchCollectionItem.id == item_id,
+        )
+        return (await self.db.execute(stmt)).scalar_one_or_none()

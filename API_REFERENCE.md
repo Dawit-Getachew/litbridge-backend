@@ -37,11 +37,18 @@
    - [Library CRUD](#library-crud)
    - [Library Items (Adding/Removing Searches)](#library-items-addingremoving-searches)
    - [User Searches](#user-searches)
-10. [System Endpoints](#system-endpoints)
-11. [SSE Event Reference](#sse-event-reference)
-12. [Search Mode Behavior Matrix](#search-mode-behavior-matrix)
-13. [Error Codes](#error-codes)
-14. [Schemas Reference](#schemas-reference)
+10. [Research Collections Endpoints](#research-collections-endpoints)
+    - [Research Collections Concepts](#research-collections-concepts)
+    - [Collection Hierarchy (Folders & Subfolders)](#collection-hierarchy-folders--subfolders)
+    - [Table View & AI-Extracted Metadata](#table-view--ai-extracted-metadata)
+    - [Collection CRUD](#collection-crud)
+    - [Collection Records](#collection-records)
+    - [AI Metadata Extraction](#ai-metadata-extraction)
+11. [System Endpoints](#system-endpoints)
+12. [SSE Event Reference](#sse-event-reference)
+13. [Search Mode Behavior Matrix](#search-mode-behavior-matrix)
+14. [Error Codes](#error-codes)
+15. [Schemas Reference](#schemas-reference)
 
 ---
 
@@ -398,6 +405,10 @@ Execute a non-streaming search. Returns immediately with a `search_id`; poll sta
 | `max_results` | integer (1-5000) | 100 | No | Capped to 100 for quick/light_thinking |
 | `workflow` | boolean | false | No | **Set to `true` to trigger the structured search workflow** (see [Workflow section](#structured-search-workflow-human-in-the-loop)) |
 
+> **PICO Auto-Fill:** When `query_type` is `"structured"`, the backend **always fills all 4 PICO components** (P, I, C, O). If the user provides only some elements (e.g. P, I, O), the system infers the missing element(s) using MeSH-backed AI. In the response, auto-filled elements have their `*_inferred` flag set to `true` (e.g. `comparison_inferred: true`). The frontend should render inferred elements differently (e.g. lighter text or a badge) so the user knows they were AI-generated.
+>
+> This auto-fill applies to **all PICO paths**: `POST /search`, `POST /search/preview`, `POST /search/stream`, `POST /workflow/start`, and `POST /workflow/pico-preview`.
+
 > **Important:** When `workflow: true`, the frontend should **not** use this endpoint. Instead, use the dedicated `/api/v1/workflow/start` endpoint to begin the human-in-the-loop process. The `workflow` flag on `SearchRequest` is used internally by the workflow engine when it executes the final search.
 
 **Response:** `SearchResponse`
@@ -685,12 +696,14 @@ You can start from a free-text query **or** from structured PICO input:
       {
         "text": "type 2 diabetes",
         "confidence": 0.95,
+        "inferred": false,
         "provenance": "llm",
         "facet": null
       },
       {
         "text": "adults",
         "confidence": 0.7,
+        "inferred": true,
         "provenance": "llm",
         "facet": "age group"
       }
@@ -699,6 +712,7 @@ You can start from a free-text query **or** from structured PICO input:
       {
         "text": "metformin",
         "confidence": 0.99,
+        "inferred": false,
         "provenance": "llm",
         "facet": null
       }
@@ -707,6 +721,7 @@ You can start from a free-text query **or** from structured PICO input:
       {
         "text": "sulfonylureas",
         "confidence": 0.95,
+        "inferred": false,
         "provenance": "llm",
         "facet": null
       }
@@ -715,6 +730,7 @@ You can start from a free-text query **or** from structured PICO input:
       {
         "text": "cardiovascular events",
         "confidence": 0.9,
+        "inferred": false,
         "provenance": "llm",
         "facet": null
       }
@@ -761,7 +777,7 @@ You can start from a free-text query **or** from structured PICO input:
 
 - `workflow_session_id` — Use this in all subsequent workflow calls as `{session_id}`
 - `awaiting` — Tells the frontend what the user should review next. Values: `"keywords_review"`, `"mesh_review"`, `"query_review"`, or `null`
-- `pico` — Extracted PICO elements organized by concept (`P`, `I`, `C`, `O`). Each element has `text`, `confidence` (0-1), `provenance` (`"llm"` or `"user"`), and optional `facet`
+- `pico` — Extracted PICO elements organized by concept (`P`, `I`, `C`, `O`). **All 4 components are always populated** (missing ones are inferred). Each element has `text`, `confidence` (0-1), `inferred` (true if AI-generated to fill a gap), `provenance` (`"llm"` or `"user"`), and optional `facet`
 - `keywords` — Synonym suggestions organized as `{ concept: { base_term: [suggestions] } }`. Each suggestion has a `variant` type: `"synonym"`, `"abbreviation"`, `"spelling"`, `"lay_term"`, or `"phrase_variant"`
 
 **What the frontend should display:** Show the PICO elements in an editable list (let users add/remove/edit terms). Show keywords grouped under their base terms with accept/reject toggles.
@@ -788,16 +804,20 @@ Quick stateless PICO extraction without creating a workflow session. Useful for 
 
 **Response:** `200 OK`
 
+All 4 PICO components are guaranteed to have at least one element. Components not explicitly stated in the question are inferred by AI and marked with `inferred: true`.
+
 ```json
 {
   "pico": {
-    "P": [{"text": "type 2 diabetes", "confidence": 0.95, "provenance": "llm", "facet": null}],
-    "I": [{"text": "metformin", "confidence": 0.99, "provenance": "llm", "facet": null}],
-    "C": [],
-    "O": [{"text": "cardiovascular events", "confidence": 0.9, "provenance": "llm", "facet": null}]
+    "P": [{"text": "type 2 diabetes", "confidence": 0.95, "inferred": false, "provenance": "llm", "facet": null}],
+    "I": [{"text": "metformin", "confidence": 0.99, "inferred": false, "provenance": "llm", "facet": null}],
+    "C": [{"text": "placebo", "confidence": 0.7, "inferred": true, "provenance": "llm", "facet": null}, {"text": "standard of care", "confidence": 0.65, "inferred": true, "provenance": "llm", "facet": null}],
+    "O": [{"text": "cardiovascular events", "confidence": 0.9, "inferred": false, "provenance": "llm", "facet": null}]
   }
 }
 ```
+
+**Note:** In this example, the user's question mentioned P, I, and O but not C (Comparison). The system inferred "placebo" and "standard of care" as comparators. Both have `inferred: true`.
 
 ---
 
@@ -1651,6 +1671,356 @@ The Library system lets authenticated users organize their search sessions into 
 
 ---
 
+## Research Collections Endpoints
+
+The Research Collections system lets authenticated users save individual papers from search results into organized folders and subfolders, and view them in card or table format with AI-extracted metadata.
+
+**All research collection endpoints require authentication** — send `Authorization: Bearer <access_token>`.
+
+> **Library vs. Research Collections:** The Library system (section 9) organizes **search sessions** (entire searches) into folders. Research Collections organize **individual papers** (records from search results) into folders with AI-extracted metadata for table view.
+
+### Research Collections Concepts
+
+- **Collection** — A named folder for organizing saved papers. Supports a 2-level hierarchy (folders and subfolders).
+- **Collection Item** — A link between a collection and a specific record (paper) from a search session. Each item stores the `record_id`, `search_session_id`, optional title/notes, and AI-extracted metadata.
+- **Hierarchy** — Collections support up to 2 levels of nesting. A root collection has `parent_id: null`. A subfolder has `parent_id` set to its parent collection's ID. Deeper nesting (3+ levels) is rejected with a `422` error.
+- **Aggregated View** — When viewing a parent collection, `all_items` includes papers from the collection itself **plus** all papers from its subfolders. `items` contains only the collection's own papers.
+- **AI Metadata** — When papers are added to a collection, the system automatically extracts structured metadata (study design, sample size, outcomes, etc.) from the paper's abstract using AI. This runs in the background and is available for table view display.
+
+### Collection Hierarchy (Folders & Subfolders)
+
+```
+Diabetes Research (parent collection)
+├── 5 papers (directly in parent)
+├── Type 1 Studies (subfolder)
+│   └── 12 papers
+└── Type 2 Studies (subfolder)
+    └── 29 papers
+
+Viewing "Diabetes Research" → all_items: 46 papers (5 + 12 + 29)
+Viewing "Type 1 Studies"     → items: 12 papers (only its own)
+```
+
+Key rules:
+- **Max nesting depth**: 2 levels (parent → child). A child collection cannot have its own children.
+- **Cascading delete**: Deleting a parent deletes all subfolders and their items.
+- **Paper in parent only**: Papers can be added directly to a parent collection without being in any subfolder.
+
+### Table View & AI-Extracted Metadata
+
+Every `CollectionItemResponse` includes a `metadata` object with 10 structured fields extracted from the paper's abstract by AI. The frontend toggles between card view and table view — the backend always returns the same data.
+
+**Metadata Fields:**
+
+| Column | Description | Example |
+|---|---|---|
+| `study_details` | Brief study description | "Phase III RCT of metformin vs. placebo" |
+| `study_design` | Study methodology | "Double-blind randomized controlled trial" |
+| `setting` | Where the study was conducted | "12 tertiary care hospitals in Europe" |
+| `interventions` | Treatments or exposures tested | "Metformin 1000mg/day vs. placebo" |
+| `sample_size` | Number of participants | "N=2,480 (1,240 per arm)" |
+| `primary_outcome` | Main outcome measured | "Major adverse cardiovascular events (MACE)" |
+| `secondary_outcome` | Additional outcomes | "All-cause mortality, HbA1c change" |
+| `primary_statistics` | Primary statistical results | "HR 0.78 (95% CI: 0.65-0.93), p=0.006" |
+| `secondary_statistics` | Secondary statistical results | "NNT=12; mortality HR 0.85 (p=0.12)" |
+| `key_findings` | Summary of conclusions | "Metformin reduced MACE by 22% in T2DM patients" |
+
+If information is unavailable from the abstract, the field defaults to `"Not reported"`.
+
+**Cost management:**
+- AI extraction runs once per paper (background task when added to collection)
+- Results are cached in Redis (30-day TTL) and persisted in the database (JSONB)
+- Papers without abstracts skip the LLM call entirely (all fields default to "Not reported")
+- Batch extraction uses bounded concurrency (max 5 parallel LLM calls)
+
+### Collection CRUD
+
+#### GET `/api/v1/collections`
+
+**Requires authentication.** List all root collections as a tree with subfolders, item counts, and items.
+
+**Response:** `200 OK` — `CollectionTreeResponse`
+
+```json
+{
+  "collections": [
+    {
+      "id": "col-001",
+      "name": "Diabetes Research",
+      "description": "All diabetes-related papers",
+      "parent_id": null,
+      "icon": "flask",
+      "color": "#3498db",
+      "position": 0,
+      "item_count": 5,
+      "children_count": 2,
+      "total_item_count": 46,
+      "created_at": "2026-03-01T10:00:00Z",
+      "updated_at": "2026-03-15T14:30:00Z",
+      "items": [
+        {
+          "id": "item-001",
+          "collection_id": "col-001",
+          "record_id": "pubmed_39876543",
+          "search_session_id": "abc-123",
+          "title": "Metformin and Cardiovascular Risk",
+          "notes": null,
+          "metadata": {
+            "study_details": "Phase III RCT of metformin vs. placebo",
+            "study_design": "Double-blind randomized controlled trial",
+            "setting": "12 tertiary care hospitals in Europe",
+            "interventions": "Metformin 1000mg/day vs. placebo",
+            "sample_size": "N=2,480",
+            "primary_outcome": "Major adverse cardiovascular events",
+            "secondary_outcome": "All-cause mortality",
+            "primary_statistics": "HR 0.78 (95% CI: 0.65-0.93), p=0.006",
+            "secondary_statistics": "NNT=12",
+            "key_findings": "Metformin reduced MACE by 22%"
+          },
+          "created_at": "2026-03-02T09:00:00Z"
+        }
+      ],
+      "all_items": [ "... all 46 items from parent + subfolders ..." ],
+      "children": [
+        {
+          "id": "col-002",
+          "name": "Type 1 Studies",
+          "description": null,
+          "parent_id": "col-001",
+          "icon": null,
+          "color": null,
+          "position": 0,
+          "item_count": 12,
+          "children_count": 0,
+          "total_item_count": 12,
+          "created_at": "2026-03-02T10:00:00Z",
+          "updated_at": "2026-03-10T16:00:00Z"
+        },
+        {
+          "id": "col-003",
+          "name": "Type 2 Studies",
+          "description": null,
+          "parent_id": "col-001",
+          "icon": null,
+          "color": null,
+          "position": 1,
+          "item_count": 29,
+          "children_count": 0,
+          "total_item_count": 29,
+          "created_at": "2026-03-03T08:00:00Z",
+          "updated_at": "2026-03-14T11:00:00Z"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+#### POST `/api/v1/collections`
+
+**Requires authentication.** Create a new research collection (folder or subfolder).
+
+**Request Body:** `CreateCollectionRequest`
+
+```json
+{
+  "name": "Type 1 Studies",
+  "description": "Papers on Type 1 diabetes",
+  "parent_id": "col-001",
+  "icon": null,
+  "color": "#e74c3c"
+}
+```
+
+| Field | Type | Required | Validation | Description |
+|---|---|---|---|---|
+| `name` | string | Yes | 1-255 chars | Collection name |
+| `description` | string \| null | No | — | Optional description |
+| `parent_id` | UUID \| null | No | Must be an existing collection you own | Parent collection for subfolder (null = root folder) |
+| `icon` | string \| null | No | Max 64 chars | Icon name or emoji |
+| `color` | string \| null | No | Max 32 chars | Hex color code |
+
+**Response:** `201 Created` — `CollectionResponse`
+
+**Errors:** `422` (nesting depth exceeded — max 2 levels; or invalid parent_id), `404` (parent not found)
+
+---
+
+#### GET `/api/v1/collections/{collection_id}`
+
+**Requires authentication.** Get a collection with its own items, aggregated items from all descendants, and direct children.
+
+**Response:** `200 OK` — `CollectionDetailResponse`
+
+```json
+{
+  "id": "col-001",
+  "name": "Diabetes Research",
+  "description": "All diabetes-related papers",
+  "parent_id": null,
+  "icon": "flask",
+  "color": "#3498db",
+  "position": 0,
+  "item_count": 5,
+  "children_count": 2,
+  "total_item_count": 46,
+  "created_at": "2026-03-01T10:00:00Z",
+  "updated_at": "2026-03-15T14:30:00Z",
+  "items": [ "... 5 items directly in this collection ..." ],
+  "all_items": [ "... all 46 items from this collection + subfolders ..." ],
+  "children": [
+    {
+      "id": "col-002",
+      "name": "Type 1 Studies",
+      "parent_id": "col-001",
+      "item_count": 12,
+      "children_count": 0,
+      "total_item_count": 12,
+      "..."
+    }
+  ]
+}
+```
+
+**Key distinction:**
+- `items` — Only papers directly in **this** collection (not in subfolders)
+- `all_items` — Papers from this collection **plus** all subfolder papers (for the aggregated view)
+- `children` — Direct child collections (subfolders)
+
+**Errors:** `403`, `404`
+
+---
+
+#### PATCH `/api/v1/collections/{collection_id}`
+
+**Requires authentication.** Update collection name, description, icon, color, or position.
+
+**Request Body:** `UpdateCollectionRequest`
+
+```json
+{
+  "name": "Diabetes Research (Updated)",
+  "color": "#2ecc71"
+}
+```
+
+**Response:** `200 OK` — `CollectionResponse`
+
+**Errors:** `403`, `404`
+
+---
+
+#### DELETE `/api/v1/collections/{collection_id}`
+
+**Requires authentication.** Delete a collection, its subfolders, and all items within them.
+
+**Response:** `204 No Content`
+
+**Errors:** `403`, `404`
+
+---
+
+### Collection Records
+
+#### POST `/api/v1/collections/{collection_id}/records`
+
+**Requires authentication.** Add one or more papers to a collection. AI metadata extraction runs automatically in the background.
+
+**Request Body:** `AddRecordsRequest`
+
+```json
+{
+  "records": [
+    {
+      "record_id": "pubmed_39876543",
+      "search_session_id": "a3f8c9d1-2e45-4b7a-9c3d-1234567890ab",
+      "title": "Metformin and Cardiovascular Risk Reduction",
+      "notes": "Key paper for systematic review"
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `records` | AddRecordItem[] | Yes | At least 1 record |
+
+**AddRecordItem fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `record_id` | string | Yes | The `UnifiedRecord.id` value (e.g. `"pubmed_39876543"`) |
+| `search_session_id` | UUID | Yes | The search session the record came from |
+| `title` | string \| null | No | Title snapshot (max 512 chars) for quick display |
+| `notes` | string \| null | No | User annotation about this paper |
+
+**Response:** `201 Created` — `CollectionItemResponse[]`
+
+Each returned item includes the `metadata` field. Initially, metadata fields may show `"Not reported"` while background extraction is in progress. Re-fetch the collection or call the extract endpoint to get updated metadata.
+
+**Errors:** `403`, `404`
+
+---
+
+#### DELETE `/api/v1/collections/{collection_id}/records/{record_id}`
+
+**Requires authentication.** Remove a paper from a collection.
+
+**Response:** `204 No Content`
+
+**Errors:** `400` (record not in collection), `403`, `404`
+
+---
+
+#### POST `/api/v1/collections/{collection_id}/records/{record_id}/move`
+
+**Requires authentication.** Move a paper from one collection to another. The AI-extracted metadata is preserved during the move.
+
+**Request Body:** `MoveRecordRequest`
+
+```json
+{
+  "target_collection_id": "col-003"
+}
+```
+
+**Response:** `200 OK` — `CollectionItemResponse` (the moved item in its new collection)
+
+**Errors:** `400`, `403`, `404`
+
+---
+
+### AI Metadata Extraction
+
+#### POST `/api/v1/collections/{collection_id}/records/{record_id}/extract`
+
+**Requires authentication.** Manually trigger (or re-trigger) AI metadata extraction for a specific paper. Useful if extraction failed initially or you want to refresh the metadata.
+
+The system resolves the paper's abstract from the search session results, then uses AI to extract the 10 structured metadata fields.
+
+**Response:** `200 OK` — `PaperMetadata`
+
+```json
+{
+  "study_details": "Phase III RCT of metformin vs. placebo in T2DM",
+  "study_design": "Double-blind randomized controlled trial",
+  "setting": "12 tertiary care hospitals across 5 European countries",
+  "interventions": "Metformin 1000mg/day (n=1,240) vs. matching placebo (n=1,240)",
+  "sample_size": "N=2,480 adults with T2DM and high cardiovascular risk",
+  "primary_outcome": "Time to first major adverse cardiovascular event (MACE)",
+  "secondary_outcome": "All-cause mortality, HbA1c change at 12 months",
+  "primary_statistics": "HR 0.78 (95% CI: 0.65-0.93), p=0.006",
+  "secondary_statistics": "NNT=12 over 3 years; mortality HR 0.85 (95% CI: 0.71-1.02, p=0.12)",
+  "key_findings": "Metformin reduced MACE by 22% compared to placebo in high-risk T2DM patients over a median follow-up of 3.2 years"
+}
+```
+
+**Errors:** `400` (record not in collection), `403`, `404`
+
+---
+
 ## System Endpoints
 
 ### GET `/`
@@ -1815,6 +2185,10 @@ For `422` validation errors, FastAPI returns a structured error:
 | `intervention` | string \| null | null | Treatment or exposure |
 | `comparison` | string \| null | null | Alternative being compared |
 | `outcome` | string \| null | null | Measured outcome |
+| `population_inferred` | boolean | false | `true` if Population was auto-filled by AI |
+| `intervention_inferred` | boolean | false | `true` if Intervention was auto-filled by AI |
+| `comparison_inferred` | boolean | false | `true` if Comparison was auto-filled by AI |
+| `outcome_inferred` | boolean | false | `true` if Outcome was auto-filled by AI |
 
 ### UnifiedRecord
 
@@ -1885,6 +2259,7 @@ For `422` validation errors, FastAPI returns a structured error:
 |---|---|---|
 | `text` | string | The PICO term text |
 | `confidence` | float \| null | AI confidence score (0-1) |
+| `inferred` | boolean | `true` if the element was AI-generated to fill a missing PICO component; `false` if explicitly provided by the user |
 | `provenance` | string | `"llm"` (AI-extracted) or `"user"` (manually added) |
 | `facet` | string \| null | Sub-classification (e.g. `"age group"`, `"condition"`) |
 
@@ -2098,6 +2473,80 @@ Extends `LibraryResponse` with:
 | `sources` | string \| null | null | Comma-separated: `pubmed,openalex` |
 | `open_access_only` | boolean | false | Filter to OA-only records |
 
+### PaperMetadata
+
+AI-extracted structured metadata for table view display. All fields default to `"Not reported"` if unavailable.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `study_details` | string | `"Not reported"` | Brief study description |
+| `study_design` | string | `"Not reported"` | Study methodology (e.g. RCT, cohort) |
+| `setting` | string | `"Not reported"` | Where the study was conducted |
+| `interventions` | string | `"Not reported"` | Treatments or exposures tested |
+| `sample_size` | string | `"Not reported"` | Number of participants |
+| `primary_outcome` | string | `"Not reported"` | Main outcome measured |
+| `secondary_outcome` | string | `"Not reported"` | Additional outcomes |
+| `primary_statistics` | string | `"Not reported"` | Primary statistical results |
+| `secondary_statistics` | string | `"Not reported"` | Secondary statistical results |
+| `key_findings` | string | `"Not reported"` | Summary of conclusions |
+
+### CreateCollectionRequest
+
+| Field | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `name` | string | — | Yes | Collection name (1-255 chars) |
+| `description` | string \| null | null | No | Optional description |
+| `parent_id` | UUID \| null | null | No | Parent collection UUID for subfolder (null = root) |
+| `icon` | string \| null | null | No | Icon name or emoji (max 64 chars) |
+| `color` | string \| null | null | No | Hex color or color name (max 32 chars) |
+
+### CollectionItemResponse
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Item UUID |
+| `collection_id` | UUID | Parent collection UUID |
+| `record_id` | string | The `UnifiedRecord.id` value |
+| `search_session_id` | UUID | Origin search session for resolving full record data |
+| `title` | string \| null | Title snapshot set at add-time |
+| `notes` | string \| null | User annotation |
+| `metadata` | PaperMetadata | AI-extracted structured metadata (always present; defaults to "Not reported" if extraction pending) |
+| `created_at` | datetime | ISO 8601 |
+
+### CollectionResponse
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Collection UUID |
+| `name` | string | Collection name |
+| `description` | string \| null | Optional description |
+| `parent_id` | UUID \| null | Parent collection UUID (null = root folder) |
+| `icon` | string \| null | Icon name or emoji |
+| `color` | string \| null | Hex color code |
+| `position` | integer | Sort order within parent |
+| `item_count` | integer | Papers directly in this collection (not counting subfolders) |
+| `children_count` | integer | Number of direct subfolders |
+| `total_item_count` | integer | Total papers including all subfolders |
+| `created_at` | datetime | ISO 8601 |
+| `updated_at` | datetime | ISO 8601 |
+
+### CollectionDetailResponse
+
+Extends `CollectionResponse` with items and children.
+
+| Field | Type | Description |
+|---|---|---|
+| _(all CollectionResponse fields)_ | | |
+| `items` | CollectionItemResponse[] | Papers directly in **this** collection only |
+| `all_items` | CollectionItemResponse[] | Papers from this collection **plus** all subfolders (aggregated view) |
+| `children` | CollectionResponse[] | Direct child collections (subfolders) |
+
+### CollectionTreeResponse
+
+| Field | Type | Description |
+|---|---|---|
+| `collections` | CollectionDetailResponse[] | All root collections with items, aggregated items, and children nested |
+
 ---
 
 ## Complete Endpoint Summary
@@ -2109,9 +2558,9 @@ Extends `LibraryResponse` with:
 | POST | `/api/v1/auth/refresh` | None | Refresh token pair |
 | POST | `/api/v1/auth/logout` | **Required** | Revoke refresh token |
 | GET | `/api/v1/auth/me` | **Required** | Get current user profile |
-| POST | `/api/v1/search` | Optional | Execute search |
-| POST | `/api/v1/search/preview` | Optional | Preview query translations |
-| POST | `/api/v1/search/stream` | Optional | Streaming search with SSE |
+| POST | `/api/v1/search` | Optional | Execute search (PICO auto-filled) |
+| POST | `/api/v1/search/preview` | Optional | Preview query translations (PICO auto-filled) |
+| POST | `/api/v1/search/stream` | Optional | Streaming search with SSE (PICO auto-filled) |
 | GET | `/api/v1/search/{id}/status` | Optional | Check search status |
 | GET | `/api/v1/results/{id}` | Optional | Get paginated results |
 | GET | `/api/v1/enrichment/{search_id}/{record_id}` | Optional | Get record enrichment |
@@ -2119,8 +2568,8 @@ Extends `LibraryResponse` with:
 | POST | `/api/v1/chat/stream` | Optional | Chat about results (SSE) |
 | GET | `/api/v1/chat/{conversation_id}/history` | Optional | Get conversation history |
 | GET | `/api/v1/chat/conversations/{search_id}` | Optional | List conversations |
-| POST | `/api/v1/workflow/start` | Optional | Start structured workflow |
-| POST | `/api/v1/workflow/pico-preview` | Optional | Quick PICO preview |
+| POST | `/api/v1/workflow/start` | Optional | Start structured workflow (PICO auto-filled) |
+| POST | `/api/v1/workflow/pico-preview` | Optional | Quick PICO preview (PICO auto-filled) |
 | POST | `/api/v1/workflow/{id}/keywords/feedback` | Optional | Submit PICO + keyword feedback |
 | POST | `/api/v1/workflow/{id}/mesh/resolve` | Optional | Resolve custom MeSH term |
 | POST | `/api/v1/workflow/{id}/mesh/feedback` | Optional | Submit MeSH feedback |
@@ -2136,5 +2585,14 @@ Extends `LibraryResponse` with:
 | DELETE | `/api/v1/library/{id}` | **Required** | Delete library |
 | POST | `/api/v1/library/{id}/items` | **Required** | Add searches to library |
 | DELETE | `/api/v1/library/{id}/items/{search_id}` | **Required** | Remove search from library |
+| GET | `/api/v1/collections` | **Required** | List research collections (tree with items) |
+| POST | `/api/v1/collections` | **Required** | Create collection (folder/subfolder) |
+| GET | `/api/v1/collections/{id}` | **Required** | Get collection with items + children |
+| PATCH | `/api/v1/collections/{id}` | **Required** | Update collection |
+| DELETE | `/api/v1/collections/{id}` | **Required** | Delete collection + subfolders |
+| POST | `/api/v1/collections/{id}/records` | **Required** | Add papers (triggers AI extraction) |
+| DELETE | `/api/v1/collections/{id}/records/{record_id}` | **Required** | Remove paper from collection |
+| POST | `/api/v1/collections/{id}/records/{record_id}/move` | **Required** | Move paper between collections |
+| POST | `/api/v1/collections/{id}/records/{record_id}/extract` | **Required** | Re-extract AI metadata for a paper |
 | GET | `/` | None | API root |
 | GET | `/health` | None | Health check |

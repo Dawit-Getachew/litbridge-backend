@@ -35,6 +35,7 @@ from src.services.dedup_service import DedupService
 from src.services.email_service import EmailService
 from src.services.enrichment_service import EnrichmentService
 from src.services.oa_service import OAService
+from src.services.paper_extraction_service import PaperExtractionService
 from src.services.prisma_service import PrismaService
 from src.services.library_service import LibraryService
 from src.services.research_collection_service import ResearchCollectionService
@@ -137,10 +138,11 @@ def get_unpaywall_repo(request: Request) -> UnpaywallRepository:
     )
 
 
-def get_llm_client() -> LLMClient:
-    """Return shared LLM client abstraction."""
+def get_llm_client(request: Request) -> LLMClient:
+    """Return LLM client backed by the app's shared httpx client."""
 
-    return LLMClient(settings=get_settings())
+    http_client: httpx.AsyncClient | None = getattr(request.app.state, "http_client", None)
+    return LLMClient(settings=get_settings(), client=http_client)
 
 
 def get_enrichment_service(request: Request) -> EnrichmentService:
@@ -148,7 +150,7 @@ def get_enrichment_service(request: Request) -> EnrichmentService:
 
     return EnrichmentService(
         s2_repo=get_semantic_scholar_repo(request),
-        llm_client=get_llm_client(),
+        llm_client=get_llm_client(request),
         redis_client=get_redis(request),
     )
 
@@ -178,6 +180,7 @@ async def get_search_service(
         redis_client=get_redis(request),
         enrichment_service=get_enrichment_service(request),
         oa_service=get_oa_service(request),
+        llm_client=get_llm_client(request),
     )
 
 
@@ -195,6 +198,7 @@ async def get_streaming_search_service(
         redis_client=get_redis(request),
         enrichment_service=get_enrichment_service(request),
         oa_service=get_oa_service(request),
+        llm_client=get_llm_client(request),
     )
 
 
@@ -215,7 +219,7 @@ async def get_chat_service(
     settings = get_settings()
     return ChatService(
         conversation_repo=conversation_repo,
-        llm_client=get_llm_client(),
+        llm_client=get_llm_client(request),
         max_history_turns=settings.CHAT_MAX_HISTORY_TURNS,
         max_context_records=settings.CHAT_MAX_CONTEXT_RECORDS,
     )
@@ -254,6 +258,21 @@ async def get_research_collection_service(
     """Return the research collections service."""
 
     return ResearchCollectionService(repo=repo)
+
+
+async def get_paper_extraction_service(
+    request: Request,
+    repo: ResearchCollectionRepository = Depends(get_research_collection_repo),
+    search_repo: SearchRepository = Depends(get_search_repo),
+) -> PaperExtractionService:
+    """Return the AI paper metadata extraction service."""
+
+    return PaperExtractionService(
+        llm_client=get_llm_client(request),
+        redis_client=get_redis(request),
+        repo=repo,
+        search_repo=search_repo,
+    )
 
 
 # ── Auth dependencies ────────────────────────────────────────────

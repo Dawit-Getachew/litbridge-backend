@@ -21,9 +21,11 @@ from src.repositories import get_repository
 from src.repositories.search_repo import SearchRepository
 from src.schemas.records import RawRecord
 from src.schemas.search import SearchRequest
+from src.services.pico_fill_service import fill_missing_pico_state
 from src.workflow.agents.keyword_agent import run_keyword_expansion
 from src.workflow.agents.mesh_agent import run_mesh_resolution
 from src.workflow.agents.pico_agent import run_pico_extraction
+from src.workflow.agents.pico_recommender import run_pico_recommendation
 from src.workflow.mesh_resolver import (
     descriptor_to_mesh_suggestion,
     resolve_mesh_descriptor,
@@ -101,6 +103,13 @@ class WorkflowService:
         )
 
         state = await run_pico_extraction(state, self.llm)
+        state = await fill_missing_pico_state(state, self.llm)
+        state = await run_pico_recommendation(
+            state,
+            client=self.http_client,
+            api_key=self.settings.NCBI_API_KEY,
+            email=self.settings.CONTACT_EMAIL,
+        )
         state = await run_keyword_expansion(state, self.llm)
 
         await save_state(self.redis, state)
@@ -113,6 +122,7 @@ class WorkflowService:
             question=question,
         )
         state = await run_pico_extraction(state, self.llm)
+        state = await fill_missing_pico_state(state, self.llm)
         return {
             concept: [el.model_dump() for el in elements]
             for concept, elements in state.pico.items()

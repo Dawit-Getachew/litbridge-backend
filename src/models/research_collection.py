@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID as PyUUID
 
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class ResearchCollection(Base):
-    """A user-owned flat collection for organizing individual records (papers)."""
+    """A user-owned hierarchical collection for organizing individual records (papers)."""
 
     __tablename__ = "research_collections"
 
@@ -27,6 +27,12 @@ class ResearchCollection(Base):
         nullable=False,
         index=True,
     )
+    parent_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_collections.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     icon: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -34,6 +40,17 @@ class ResearchCollection(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     user: Mapped[User] = relationship("User", back_populates="research_collections")
+    parent: Mapped[ResearchCollection | None] = relationship(
+        "ResearchCollection",
+        remote_side="ResearchCollection.id",
+        back_populates="children",
+    )
+    children: Mapped[list[ResearchCollection]] = relationship(
+        "ResearchCollection",
+        back_populates="parent",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
     items: Mapped[list[ResearchCollectionItem]] = relationship(
         back_populates="collection", cascade="all, delete-orphan", lazy="selectin",
     )
@@ -62,6 +79,9 @@ class ResearchCollectionItem(Base):
     )
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_extracted: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None,
+    )
 
     collection: Mapped[ResearchCollection] = relationship(
         "ResearchCollection", back_populates="items",

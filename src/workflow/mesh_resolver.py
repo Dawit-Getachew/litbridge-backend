@@ -171,6 +171,57 @@ async def resolve_mesh_descriptor(
     return chosen, translation
 
 
+async def suggest_related_descriptors(
+    tree_numbers: list[str],
+    client: httpx.AsyncClient,
+    api_key: str,
+    email: str,
+    max_siblings: int = 5,
+) -> list[dict[str, Any]]:
+    """Fetch sibling MeSH descriptors sharing a parent tree branch.
+
+    Given tree numbers like ["C18.452.394.750.149"], searches for
+    descriptors under the parent prefix "C18.452.394.750" to find
+    related terms at the same specificity level.
+    """
+    seen_uids: set[str] = set()
+    related: list[dict[str, Any]] = []
+
+    parent_prefixes: set[str] = set()
+    for tn in tree_numbers:
+        parts = tn.rsplit(".", 1)
+        if len(parts) == 2:
+            parent_prefixes.add(parts[0])
+
+    for prefix in list(parent_prefixes)[:3]:
+        try:
+            search_term = f"{prefix}[Tree Number]"
+            idlist, _ = await _esearch_mesh(
+                search_term, client, api_key, email, retmax=max_siblings + 2,
+            )
+            for uid in idlist[:max_siblings + 2]:
+                if uid in seen_uids:
+                    continue
+                rec = await _esummary_mesh(uid, client, api_key, email)
+                if not rec:
+                    continue
+                desc = _parse_descriptor(rec)
+                if not desc:
+                    continue
+                desc_uid = str(desc.get("uid", ""))
+                if desc_uid in seen_uids:
+                    continue
+                seen_uids.add(desc_uid)
+                related.append(desc)
+                if len(related) >= max_siblings:
+                    return related
+        except Exception as exc:
+            logger.warning("suggest_related_error", prefix=prefix, error=str(exc))
+            continue
+
+    return related
+
+
 def descriptor_to_mesh_suggestion(
     descriptor: dict[str, Any],
     *,

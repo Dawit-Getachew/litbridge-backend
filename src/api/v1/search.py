@@ -4,12 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from src.ai.adapters import translate_for_all_sources
+from src.ai.llm_client import LLMClient
 from src.api.v1.sse import stream_generator
 from src.core.exceptions import RateLimitError, SearchNotFoundError, SourceFetchError
-from src.core.deps import get_current_user_optional, get_search_service, get_streaming_search_service
+from src.core.deps import get_current_user_optional, get_llm_client, get_search_service, get_streaming_search_service
 from src.models.user import User
+from src.schemas.enums import QueryType
 from src.schemas.records import PaginatedResults
 from src.schemas.search import SearchRequest, SearchResponse, SearchStatusResponse
+from src.services.pico_fill_service import fill_missing_pico
 from src.services.search_service import SearchService
 from src.services.streaming_search_service import StreamingSearchService
 
@@ -48,13 +51,18 @@ async def execute_search(
 @router.post("/search/preview")
 async def preview_search_query(
     request: SearchRequest,
+    llm: LLMClient = Depends(get_llm_client),
     user: User | None = Depends(get_current_user_optional),
 ) -> dict[str, dict[str, str]]:
     """Return per-source translated query previews without executing search."""
+    pico = request.pico
+    if request.query_type is QueryType.PICO and pico is not None:
+        pico = await fill_missing_pico(pico, llm)
+
     translated = await translate_for_all_sources(
         query=request.query,
         query_type=request.query_type,
-        pico=request.pico,
+        pico=pico,
         sources=request.sources,
     )
     return {"translations": {source.value: query for source, query in translated.items()}}

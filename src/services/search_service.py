@@ -8,15 +8,17 @@ from datetime import datetime, timezone
 import structlog
 from redis.asyncio import Redis
 
+from src.ai.llm_client import LLMClient
 from src.core.exceptions import SearchNotFoundError
 from src.repositories.search_repo import SearchRepository
-from src.schemas.enums import SourceType, SearchMode
+from src.schemas.enums import QueryType, SourceType, SearchMode
 from src.schemas.records import PaginatedResults, UnifiedRecord
 from src.schemas.search import SearchRequest, SearchResponse, SearchStatusResponse
 from src.services.dedup_service import DedupService
 from src.services.enrichment_service import EnrichmentService
 from src.services.fetcher_service import FetcherService
 from src.services.oa_service import OAService
+from src.services.pico_fill_service import fill_missing_pico
 from src.services.prisma_service import PrismaService
 
 
@@ -32,6 +34,7 @@ class SearchService:
         redis_client: Redis,
         enrichment_service: EnrichmentService,
         oa_service: OAService,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self.fetcher = fetcher
         self.dedup = dedup
@@ -40,6 +43,7 @@ class SearchService:
         self.redis_client = redis_client
         self.enrichment_service = enrichment_service
         self.oa_service = oa_service
+        self.llm_client = llm_client
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.logger = structlog.get_logger(__name__).bind(service="search_service")
 
@@ -49,6 +53,13 @@ class SearchService:
         user_id: str | None = None,
     ) -> SearchResponse:
         """Run A->B->C fast path and persist the resulting session data."""
+        if (
+            request.query_type is QueryType.PICO
+            and request.pico is not None
+            and self.llm_client is not None
+        ):
+            request.pico = await fill_missing_pico(request.pico, self.llm_client)
+
         from uuid import UUID as _UUID
         uid = _UUID(user_id) if user_id else None
         session = await self.search_repo.create_session(request, user_id=uid)

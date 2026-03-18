@@ -8,6 +8,23 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+# -- Paper Metadata (AI-extracted, used in table view) ------------------------
+
+class PaperMetadata(BaseModel):
+    """Structured metadata extracted from a paper for table view display."""
+
+    study_details: str = "Not reported"
+    study_design: str = "Not reported"
+    setting: str = "Not reported"
+    interventions: str = "Not reported"
+    sample_size: str = "Not reported"
+    primary_outcome: str = "Not reported"
+    secondary_outcome: str = "Not reported"
+    primary_statistics: str = "Not reported"
+    secondary_statistics: str = "Not reported"
+    key_findings: str = "Not reported"
+
+
 # -- Requests -----------------------------------------------------------------
 
 class CreateCollectionRequest(BaseModel):
@@ -17,6 +34,7 @@ class CreateCollectionRequest(BaseModel):
     description: str | None = None
     icon: str | None = Field(default=None, max_length=64)
     color: str | None = Field(default=None, max_length=32)
+    parent_id: UUID | None = None
 
 
 class UpdateCollectionRequest(BaseModel):
@@ -53,7 +71,7 @@ class MoveRecordRequest(BaseModel):
 # -- Responses ----------------------------------------------------------------
 
 class CollectionItemResponse(BaseModel):
-    """A single record within a collection."""
+    """A single record within a collection, always includes metadata."""
 
     id: UUID
     collection_id: UUID
@@ -61,6 +79,7 @@ class CollectionItemResponse(BaseModel):
     search_session_id: UUID
     title: str | None
     notes: str | None
+    metadata: PaperMetadata
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -72,10 +91,13 @@ class CollectionResponse(BaseModel):
     id: UUID
     name: str
     description: str | None
+    parent_id: UUID | None
     icon: str | None
     color: str | None
     position: int
     item_count: int = 0
+    children_count: int = 0
+    total_item_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -83,12 +105,14 @@ class CollectionResponse(BaseModel):
 
 
 class CollectionDetailResponse(CollectionResponse):
-    """Collection with its record items inlined."""
+    """Collection with its own items, all descendant items aggregated, and children."""
 
     items: list[CollectionItemResponse] = []
+    all_items: list[CollectionItemResponse] = []
+    children: list[CollectionResponse] = []
 
 
-class CollectionListResponse(BaseModel):
-    """Top-level list returned from GET /collections."""
+class CollectionTreeResponse(BaseModel):
+    """Full tree of root collections with children nested."""
 
-    collections: list[CollectionResponse]
+    collections: list[CollectionDetailResponse]

@@ -11,10 +11,11 @@ import structlog
 from redis.asyncio import Redis
 
 from src.ai.adapters import translate_for_all_sources
+from src.ai.llm_client import LLMClient
 from src.repositories import get_repository
 from src.repositories.search_repo import SearchRepository
 from src.schemas.enrichment import EnrichmentResponse
-from src.schemas.enums import OAStatus, SearchMode, SourceType
+from src.schemas.enums import OAStatus, QueryType, SearchMode, SourceType
 from src.schemas.records import RawRecord, UnifiedRecord
 from src.schemas.search import SearchRequest
 from src.schemas.streaming import StreamEvent
@@ -22,6 +23,7 @@ from src.services.dedup_service import DedupService
 from src.services.enrichment_service import EnrichmentService
 from src.services.fetcher_service import FetcherService
 from src.services.oa_service import OAService
+from src.services.pico_fill_service import fill_missing_pico
 from src.services.prisma_service import PrismaService
 
 _SOURCE_LABELS: dict[SourceType, str] = {
@@ -48,6 +50,7 @@ class StreamingSearchService:
         redis_client: Redis,
         enrichment_service: EnrichmentService,
         oa_service: OAService,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self.fetcher = fetcher
         self.dedup = dedup
@@ -56,6 +59,7 @@ class StreamingSearchService:
         self.redis_client = redis_client
         self.enrichment_service = enrichment_service
         self.oa_service = oa_service
+        self.llm_client = llm_client
         self.logger = structlog.get_logger(__name__).bind(service="streaming_search_service")
 
     async def execute_search_stream(
@@ -64,6 +68,13 @@ class StreamingSearchService:
         user_id: str | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Run federated search and yield granular progress updates as SSE events."""
+        if (
+            request.query_type is QueryType.PICO
+            and request.pico is not None
+            and self.llm_client is not None
+        ):
+            request.pico = await fill_missing_pico(request.pico, self.llm_client)
+
         from uuid import UUID as _UUID
         uid = _UUID(user_id) if user_id else None
         session = await self.search_repo.create_session(request, user_id=uid)

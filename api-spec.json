@@ -71,12 +71,16 @@
 
   "schemas": {
     "PICOInput": {
-      "description": "Structured PICO query components. At least one field must be non-empty when query_type is 'structured'.",
+      "description": "Structured PICO query components. At least one field must be non-empty when query_type is 'structured'. The backend always auto-fills missing components using MeSH-backed AI — inferred flags indicate which were filled.",
       "fields": {
-        "population":   { "type": "string | null", "default": null },
-        "intervention": { "type": "string | null", "default": null },
-        "comparison":   { "type": "string | null", "default": null },
-        "outcome":      { "type": "string | null", "default": null }
+        "population":            { "type": "string | null", "default": null },
+        "intervention":          { "type": "string | null", "default": null },
+        "comparison":            { "type": "string | null", "default": null },
+        "outcome":               { "type": "string | null", "default": null },
+        "population_inferred":   { "type": "boolean", "default": false, "description": "true if Population was auto-filled by AI." },
+        "intervention_inferred": { "type": "boolean", "default": false, "description": "true if Intervention was auto-filled by AI." },
+        "comparison_inferred":   { "type": "boolean", "default": false, "description": "true if Comparison was auto-filled by AI." },
+        "outcome_inferred":      { "type": "boolean", "default": false, "description": "true if Outcome was auto-filled by AI." }
       }
     },
     "SearchRequest": {
@@ -213,11 +217,27 @@
       }
     },
 
+    "PaperMetadata": {
+      "description": "AI-extracted structured metadata from a paper abstract for table view display. All fields default to 'Not reported' if unavailable.",
+      "fields": {
+        "study_details":        { "type": "string", "default": "Not reported", "description": "Brief study description." },
+        "study_design":         { "type": "string", "default": "Not reported", "description": "Study methodology (e.g. RCT, cohort, cross-sectional)." },
+        "setting":              { "type": "string", "default": "Not reported", "description": "Where the study was conducted." },
+        "interventions":        { "type": "string", "default": "Not reported", "description": "Treatments or exposures tested." },
+        "sample_size":          { "type": "string", "default": "Not reported", "description": "Number of participants." },
+        "primary_outcome":      { "type": "string", "default": "Not reported", "description": "Main outcome measured." },
+        "secondary_outcome":    { "type": "string", "default": "Not reported", "description": "Additional outcomes." },
+        "primary_statistics":   { "type": "string", "default": "Not reported", "description": "Primary statistical results." },
+        "secondary_statistics": { "type": "string", "default": "Not reported", "description": "Secondary statistical results." },
+        "key_findings":         { "type": "string", "default": "Not reported", "description": "Summary of conclusions." }
+      }
+    },
     "CreateCollectionRequest": {
-      "description": "Request body for creating a new research collection.",
+      "description": "Request body for creating a new research collection (folder or subfolder).",
       "fields": {
         "name":        { "type": "string", "required": true, "min_length": 1, "max_length": 255, "description": "Display name for the collection." },
         "description": { "type": "string | null", "default": null, "description": "Optional longer description." },
+        "parent_id":   { "type": "string (UUID) | null", "default": null, "description": "Parent collection UUID for subfolder. Null = root folder. Max 2 levels of nesting." },
         "icon":        { "type": "string | null", "default": null, "max_length": 64, "description": "Icon identifier (e.g. emoji or icon name)." },
         "color":       { "type": "string | null", "default": null, "max_length": 32, "description": "Hex color or color name for UI." }
       }
@@ -254,7 +274,7 @@
       }
     },
     "CollectionItemResponse": {
-      "description": "A single record within a research collection.",
+      "description": "A single record within a research collection. Always includes AI-extracted metadata for table view.",
       "fields": {
         "id":                 { "type": "string (UUID)", "description": "Item UUID." },
         "collection_id":     { "type": "string (UUID)", "description": "Parent collection UUID." },
@@ -262,42 +282,51 @@
         "search_session_id": { "type": "string (UUID)", "description": "Origin search session for resolving full record data." },
         "title":             { "type": "string | null", "description": "Title snapshot set at add-time." },
         "notes":             { "type": "string | null", "description": "User notes." },
+        "metadata":          { "type": "PaperMetadata", "description": "AI-extracted structured metadata. Defaults to 'Not reported' for all fields if extraction is pending or abstract unavailable." },
         "created_at":        { "type": "datetime (ISO 8601)" }
       }
     },
     "CollectionResponse": {
-      "description": "Research collection summary (items not inlined).",
+      "description": "Research collection summary with hierarchy metadata.",
       "fields": {
-        "id":          { "type": "string (UUID)" },
-        "name":        { "type": "string" },
-        "description": { "type": "string | null" },
-        "icon":        { "type": "string | null" },
-        "color":       { "type": "string | null" },
-        "position":    { "type": "integer", "description": "Sort order." },
-        "item_count":  { "type": "integer", "default": 0, "description": "Number of records in this collection." },
-        "created_at":  { "type": "datetime (ISO 8601)" },
-        "updated_at":  { "type": "datetime (ISO 8601)" }
+        "id":               { "type": "string (UUID)" },
+        "name":             { "type": "string" },
+        "description":      { "type": "string | null" },
+        "parent_id":        { "type": "string (UUID) | null", "description": "Parent collection UUID. Null = root folder." },
+        "icon":             { "type": "string | null" },
+        "color":            { "type": "string | null" },
+        "position":         { "type": "integer", "description": "Sort order within parent." },
+        "item_count":       { "type": "integer", "default": 0, "description": "Papers directly in this collection (not counting subfolders)." },
+        "children_count":   { "type": "integer", "default": 0, "description": "Number of direct subfolders." },
+        "total_item_count": { "type": "integer", "default": 0, "description": "Total papers including all subfolders." },
+        "created_at":       { "type": "datetime (ISO 8601)" },
+        "updated_at":       { "type": "datetime (ISO 8601)" }
       }
     },
     "CollectionDetailResponse": {
-      "description": "Research collection with its record items inlined. Extends CollectionResponse.",
+      "description": "Research collection with items, aggregated items from all descendants, and direct children. Extends CollectionResponse.",
       "fields": {
-        "id":          { "type": "string (UUID)" },
-        "name":        { "type": "string" },
-        "description": { "type": "string | null" },
-        "icon":        { "type": "string | null" },
-        "color":       { "type": "string | null" },
-        "position":    { "type": "integer" },
-        "item_count":  { "type": "integer", "default": 0 },
-        "created_at":  { "type": "datetime (ISO 8601)" },
-        "updated_at":  { "type": "datetime (ISO 8601)" },
-        "items":       { "type": "CollectionItemResponse[]", "default": [], "description": "All records in this collection." }
+        "id":               { "type": "string (UUID)" },
+        "name":             { "type": "string" },
+        "description":      { "type": "string | null" },
+        "parent_id":        { "type": "string (UUID) | null" },
+        "icon":             { "type": "string | null" },
+        "color":            { "type": "string | null" },
+        "position":         { "type": "integer" },
+        "item_count":       { "type": "integer", "default": 0 },
+        "children_count":   { "type": "integer", "default": 0 },
+        "total_item_count": { "type": "integer", "default": 0 },
+        "created_at":       { "type": "datetime (ISO 8601)" },
+        "updated_at":       { "type": "datetime (ISO 8601)" },
+        "items":            { "type": "CollectionItemResponse[]", "default": [], "description": "Papers directly in this collection only." },
+        "all_items":        { "type": "CollectionItemResponse[]", "default": [], "description": "Papers from this collection plus all subfolders (aggregated view)." },
+        "children":         { "type": "CollectionResponse[]", "default": [], "description": "Direct child collections (subfolders)." }
       }
     },
-    "CollectionListResponse": {
-      "description": "Top-level list of research collections returned from GET /collections.",
+    "CollectionTreeResponse": {
+      "description": "Full tree of root collections with items, aggregated items, and children nested. Returned by GET /collections.",
       "fields": {
-        "collections": { "type": "CollectionResponse[]", "description": "All collections owned by the authenticated user, ordered by position." }
+        "collections": { "type": "CollectionDetailResponse[]", "description": "All root collections owned by the authenticated user, with subfolders and items nested." }
       }
     }
   },
@@ -492,26 +521,27 @@
       {
         "method": "GET",
         "path": "/api/v1/collections",
-        "description": "List all research collections for the authenticated user, with item counts.",
+        "description": "List all research collections as a tree. Returns root collections with subfolders, items, and aggregated item counts.",
         "auth": "Bearer token (required)",
-        "response": { "$ref": "#/schemas/CollectionListResponse" }
+        "response": { "$ref": "#/schemas/CollectionTreeResponse" }
       },
       {
         "method": "POST",
         "path": "/api/v1/collections",
-        "description": "Create a new research collection.",
+        "description": "Create a new research collection (folder or subfolder). Set parent_id for subfolder. Max 2 levels of nesting.",
         "auth": "Bearer token (required)",
         "request": { "$ref": "#/schemas/CreateCollectionRequest" },
         "response": { "$ref": "#/schemas/CollectionResponse" },
         "status_code": 201,
         "errors": {
-          "422": "Validation error (empty name, etc.)."
+          "404": "Parent collection not found.",
+          "422": "Validation error (empty name, nesting depth exceeded)."
         }
       },
       {
         "method": "GET",
         "path": "/api/v1/collections/{collection_id}",
-        "description": "Get a research collection with all its record items inlined.",
+        "description": "Get a collection with its own items, aggregated items from all descendants (all_items), and direct children.",
         "auth": "Bearer token (required)",
         "path_params": {
           "collection_id": { "type": "string (UUID)", "description": "Collection UUID." }
@@ -540,7 +570,7 @@
       {
         "method": "DELETE",
         "path": "/api/v1/collections/{collection_id}",
-        "description": "Delete a research collection and all its items.",
+        "description": "Delete a research collection, all its subfolders, and all items within them (cascading).",
         "auth": "Bearer token (required)",
         "path_params": {
           "collection_id": { "type": "string (UUID)" }
@@ -554,7 +584,7 @@
       {
         "method": "POST",
         "path": "/api/v1/collections/{collection_id}/records",
-        "description": "Add one or more records to a research collection. Records already present are silently skipped.",
+        "description": "Add one or more papers to a collection. Duplicates silently skipped. AI metadata extraction runs in the background — the returned items have metadata defaulting to 'Not reported' until extraction completes.",
         "auth": "Bearer token (required)",
         "path_params": {
           "collection_id": { "type": "string (UUID)" }
@@ -562,7 +592,7 @@
         "request": { "$ref": "#/schemas/AddRecordsRequest" },
         "response": {
           "type": "CollectionItemResponse[]",
-          "description": "Array of newly added items (excludes duplicates that were skipped)."
+          "description": "Array of newly added items with metadata. Metadata extraction runs asynchronously."
         },
         "status_code": 201,
         "errors": {
@@ -573,7 +603,7 @@
       {
         "method": "DELETE",
         "path": "/api/v1/collections/{collection_id}/records/{record_id}",
-        "description": "Remove a record from a research collection.",
+        "description": "Remove a paper from a research collection.",
         "auth": "Bearer token (required)",
         "path_params": {
           "collection_id": { "type": "string (UUID)" },
@@ -589,7 +619,7 @@
       {
         "method": "POST",
         "path": "/api/v1/collections/{collection_id}/records/{record_id}/move",
-        "description": "Move a record from this collection to another collection. The record is removed from the source and added to the target atomically.",
+        "description": "Move a paper between collections. AI-extracted metadata is preserved during the move.",
         "auth": "Bearer token (required)",
         "path_params": {
           "collection_id": { "type": "string (UUID)", "description": "Source collection UUID." },
@@ -601,6 +631,22 @@
           "400": "Record not found in source collection, or already exists in target collection.",
           "403": "User does not own the source or target collection.",
           "404": "Source or target collection not found."
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/collections/{collection_id}/records/{record_id}/extract",
+        "description": "Manually trigger AI metadata extraction (or re-extraction) for a specific paper. Resolves the abstract from search session results, then extracts 10 structured fields using AI. Uses Redis cache (30-day TTL) and persists to database.",
+        "auth": "Bearer token (required)",
+        "path_params": {
+          "collection_id": { "type": "string (UUID)" },
+          "record_id":     { "type": "string", "description": "The UnifiedRecord.id value." }
+        },
+        "response": { "$ref": "#/schemas/PaperMetadata" },
+        "errors": {
+          "400": "Record not found in this collection.",
+          "403": "User does not own this collection.",
+          "404": "Collection not found."
         }
       }
     ]

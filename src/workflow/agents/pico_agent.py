@@ -97,12 +97,15 @@ async def run_pico_extraction(
         return state
 
     pico_raw = data.get("pico", {})
+    if not isinstance(pico_raw, dict):
+        pico_raw = {}
     for concept in ("P", "I", "C", "O"):
         elements = pico_raw.get(concept, [])
         state.pico[concept] = [
             PicoElement(
                 text=str(el.get("text", "")).strip(),
                 confidence=_safe_float(el.get("confidence")),
+                inferred=bool(el.get("inferred", False)),
                 provenance="llm",
                 facet=str(el["facet"]) if el.get("facet") is not None else None,
             )
@@ -110,7 +113,18 @@ async def run_pico_extraction(
             if isinstance(el, dict) and str(el.get("text", "")).strip()
         ]
 
+    empty_concepts = [c for c in ("P", "I", "C", "O") if not state.pico[c]]
+    if empty_concepts:
+        logger.warning(
+            "pico_extraction_empty_concepts",
+            session_id=state.session_id,
+            empty=empty_concepts,
+            msg="LLM returned empty elements despite prompt requiring all 4",
+        )
+
     targets_raw = data.get("atomic_targets", {})
+    if not isinstance(targets_raw, dict):
+        targets_raw = {}
     for concept in ("P", "I", "C", "O"):
         raw = targets_raw.get(concept, [])
         state.atomic_targets[concept] = [
@@ -122,6 +136,8 @@ async def run_pico_extraction(
             ]
 
     modifiers_raw = data.get("modifiers", {})
+    if not isinstance(modifiers_raw, dict):
+        modifiers_raw = {}
     for concept in ("P", "I", "C", "O"):
         concept_mods = modifiers_raw.get(concept, {})
         if isinstance(concept_mods, dict):
@@ -135,6 +151,9 @@ async def run_pico_extraction(
         "pico_extraction_complete",
         session_id=state.session_id,
         pico_counts={c: len(state.pico[c]) for c in "PICO"},
+        inferred_counts={
+            c: sum(1 for el in state.pico[c] if el.inferred) for c in "PICO"
+        },
         target_counts={c: len(state.atomic_targets[c]) for c in "PICO"},
     )
 

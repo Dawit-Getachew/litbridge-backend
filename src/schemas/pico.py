@@ -10,3 +10,8 @@ class PICOInput(BaseModel):
     intervention: str | None = None
     comparison: str | None = None
     outcome: str | None = None
+
+    population_inferred: bool = False
+    intervention_inferred: bool = False
+    comparison_inferred: bool = False
+    outcome_inferred: bool = False

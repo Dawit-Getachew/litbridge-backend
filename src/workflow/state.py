@@ -24,6 +24,7 @@ class PicoElement(BaseModel):
 
     text: str
     confidence: float | None = None
+    inferred: bool = False
     provenance: Literal["llm", "user"] = "llm"
     facet: str | None = None
 
