@@ -205,6 +205,8 @@ class ResearchCollectionRepository:
                 selectinload(ResearchCollection.items),
                 selectinload(ResearchCollection.children)
                 .selectinload(ResearchCollection.items),
+                selectinload(ResearchCollection.children)
+                .selectinload(ResearchCollection.children),
             )
         )
         result = await self.db.execute(stmt)
@@ -219,6 +221,8 @@ class ResearchCollectionRepository:
                 selectinload(ResearchCollection.items),
                 selectinload(ResearchCollection.children)
                 .selectinload(ResearchCollection.items),
+                selectinload(ResearchCollection.children)
+                .selectinload(ResearchCollection.children),
             )
         )
         return (await self.db.execute(stmt)).scalar_one_or_none()
