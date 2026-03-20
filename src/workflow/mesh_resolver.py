@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -16,24 +16,61 @@ logger = structlog.get_logger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-_rate_semaphore = asyncio.Semaphore(10)
-_MIN_REQUEST_INTERVAL = 0.11  # ~9 req/s with API key
+_rate_semaphore = asyncio.Semaphore(3)
+_rate_lock = asyncio.Lock()
+_last_request_at: float = 0.0
+_MIN_REQUEST_INTERVAL = 0.12  # ~8 req/s, headroom under NCBI's 10/s limit
+_MAX_RETRIES = 3
 
 
 def _norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
 
 
+def _parse_retry_after(value: str | None) -> float:
+    """Parse Retry-After header value into seconds to wait."""
+    if not value:
+        return 1.0
+    try:
+        return max(0.5, min(float(value), 30.0))
+    except ValueError:
+        return 1.0
+
+
 async def _eutils_get(
     client: httpx.AsyncClient,
     url: str,
 ) -> dict[str, Any]:
-    """Rate-limited GET returning parsed JSON."""
-    async with _rate_semaphore:
-        await asyncio.sleep(_MIN_REQUEST_INTERVAL)
-        resp = await client.get(url, timeout=30.0)
+    """Rate-limited GET with 429 retry, returning parsed JSON."""
+    global _last_request_at  # noqa: PLW0603
+
+    for attempt in range(_MAX_RETRIES + 1):
+        async with _rate_semaphore:
+            async with _rate_lock:
+                elapsed = time.monotonic() - _last_request_at
+                if elapsed < _MIN_REQUEST_INTERVAL:
+                    await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+                _last_request_at = time.monotonic()
+            resp = await client.get(url, timeout=30.0)
+
+        if resp.status_code == 429:
+            if attempt >= _MAX_RETRIES:
+                resp.raise_for_status()
+            wait = _parse_retry_after(resp.headers.get("Retry-After"))
+            logger.warning(
+                "ncbi_rate_limited",
+                url=url[:80],
+                retry_after=wait,
+                attempt=attempt + 1,
+            )
+            await asyncio.sleep(wait)
+            continue
+
         resp.raise_for_status()
         return resp.json()
+
+    resp.raise_for_status()
+    return {}
 
 
 async def _esearch_mesh(
