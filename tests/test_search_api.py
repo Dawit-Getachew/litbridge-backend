@@ -44,7 +44,7 @@ class InMemorySearchRepository:
     def __init__(self) -> None:
         self.sessions: dict[str, FakeSearchSession] = {}
 
-    async def create_session(self, request: SearchRequest) -> FakeSearchSession:
+    async def create_session(self, request: SearchRequest, *, user_id: object = None) -> FakeSearchSession:
         session = FakeSearchSession(
             id=uuid4(),
             query=request.query,
