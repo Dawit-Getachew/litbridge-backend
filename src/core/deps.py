@@ -8,6 +8,7 @@ from uuid import UUID
 import httpx
 import jwt
 import redis.asyncio as redis
+import structlog
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,8 @@ from src.services.library_service import LibraryService
 from src.services.research_collection_service import ResearchCollectionService
 from src.services.search_service import SearchService
 from src.services.streaming_search_service import StreamingSearchService
+
+logger = structlog.get_logger(__name__)
 
 oauth2_scheme = HTTPBearer(auto_error=True)
 oauth2_scheme_optional = HTTPBearer(auto_error=False)
@@ -307,7 +310,7 @@ async def get_auth_service(
 
 
 async def get_current_user(
-    token: HTTPAuthorizationCredentials,
+    token: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> User:
     """Decode JWT and load the authenticated user, or raise 401."""
@@ -337,5 +340,6 @@ async def get_current_user_optional(
         return None
     try:
         return await get_current_user(token=token, user_repo=user_repo)
-    except AuthenticationError:
+    except AuthenticationError as exc:
+        logger.warning("optional_auth_failed", reason=exc.message)
         return None
