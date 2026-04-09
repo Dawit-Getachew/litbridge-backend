@@ -9,7 +9,7 @@ import httpx
 import jwt
 import redis.asyncio as redis
 from fastapi import Depends, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ai.llm_client import LLMClient
@@ -42,8 +42,8 @@ from src.services.research_collection_service import ResearchCollectionService
 from src.services.search_service import SearchService
 from src.services.streaming_search_service import StreamingSearchService
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/verify-otp", auto_error=True)
-oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/verify-otp", auto_error=False)
+oauth2_scheme = HTTPBearer(auto_error=True)
+oauth2_scheme_optional = HTTPBearer(auto_error=False)
 
 
 def get_settings() -> Settings:
@@ -307,13 +307,13 @@ async def get_auth_service(
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    token: HTTPAuthorizationCredentials,
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> User:
     """Decode JWT and load the authenticated user, or raise 401."""
 
     try:
-        payload = decode_access_token(token)
+        payload = decode_access_token(token.credentials)
     except jwt.InvalidTokenError:
         raise AuthenticationError("Invalid or expired access token.")
 
@@ -328,7 +328,7 @@ async def get_current_user(
 
 
 async def get_current_user_optional(
-    token: str | None = Depends(oauth2_scheme_optional),
+    token: HTTPAuthorizationCredentials | None = Depends(oauth2_scheme_optional),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> User | None:
     """Like ``get_current_user`` but returns ``None`` when no token is present."""
