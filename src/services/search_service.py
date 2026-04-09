@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from uuid import UUID
 
 import structlog
 from redis.asyncio import Redis
@@ -13,7 +14,13 @@ from src.core.exceptions import SearchNotFoundError
 from src.repositories.search_repo import SearchRepository
 from src.schemas.enums import QueryType, SourceType, SearchMode
 from src.schemas.records import PaginatedResults, UnifiedRecord
-from src.schemas.search import SearchRequest, SearchResponse, SearchStatusResponse
+from src.schemas.search import (
+    SearchHistoryItem,
+    SearchHistoryResponse,
+    SearchRequest,
+    SearchResponse,
+    SearchStatusResponse,
+)
 from src.services.dedup_service import DedupService
 from src.services.enrichment_service import EnrichmentService
 from src.services.fetcher_service import FetcherService
@@ -144,6 +151,40 @@ class SearchService:
             sources_completed=sources_completed,
             sources_failed=sources_failed,
             progress_pct=progress_pct,
+        )
+
+    async def list_user_search_history(
+        self,
+        user_id: str,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> SearchHistoryResponse:
+        """Return cursor-paginated search history for one authenticated user."""
+        uid = UUID(user_id)
+        sessions, next_cursor = await self.search_repo.list_user_sessions_by_cursor(
+            uid,
+            limit=limit,
+            cursor=cursor,
+        )
+        total = await self.search_repo.count_user_sessions(uid)
+        return SearchHistoryResponse(
+            searches=[
+                SearchHistoryItem(
+                    id=session.id,
+                    query=session.query,
+                    query_type=session.query_type,
+                    search_mode=session.search_mode,
+                    sources=session.sources or [],
+                    status=session.status,
+                    total_after_dedup=session.total_after_dedup,
+                    created_at=session.created_at,
+                    updated_at=session.updated_at,
+                )
+                for session in sessions
+            ],
+            total=total,
+            next_cursor=next_cursor,
         )
 
     @staticmethod

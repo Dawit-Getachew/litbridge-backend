@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -21,10 +22,82 @@ _rate_lock = asyncio.Lock()
 _last_request_at: float = 0.0
 _MIN_REQUEST_INTERVAL = 0.12  # ~8 req/s, headroom under NCBI's 10/s limit
 _MAX_RETRIES = 3
+_MIN_CONFIDENCE_SINGLE_TOKEN = 0.35
+_MIN_CONFIDENCE_MULTI_TOKEN = 0.45
+_EARLY_ACCEPT_CONFIDENCE = 1.0
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
+
+
+def _tokenize(text: str) -> set[str]:
+    return {tok for tok in _TOKEN_RE.findall(_norm(text)) if len(tok) > 1}
+
+
+def _overlap_ratio(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _score_descriptor(
+    descriptor: dict[str, Any],
+    *,
+    input_term: str,
+    translation_term: str | None,
+) -> float:
+    """Score one descriptor for semantic fit to the input term."""
+    name = _norm(str(descriptor.get("name", "")))
+    entry_terms = [_norm(str(entry)) for entry in descriptor.get("entry_terms", [])]
+    input_norm = _norm(input_term)
+    translation_norm = _norm(translation_term or "")
+
+    if not name:
+        return 0.0
+
+    score = 0.0
+
+    if input_norm and name == input_norm:
+        score += 0.8
+    if translation_norm and name == translation_norm:
+        score += 0.8
+
+    if input_norm and input_norm in entry_terms:
+        score += 0.55
+    if translation_norm and translation_norm in entry_terms:
+        score += 0.45
+
+    input_tokens = _tokenize(input_norm)
+    name_tokens = _tokenize(name)
+    score += 0.55 * _overlap_ratio(input_tokens, name_tokens)
+
+    if input_tokens and entry_terms:
+        best_entry_overlap = max(
+            (_overlap_ratio(input_tokens, _tokenize(entry)) for entry in entry_terms),
+            default=0.0,
+        )
+        score += 0.3 * best_entry_overlap
+
+    min_depth = descriptor.get("min_depth")
+    if isinstance(min_depth, int) and min_depth >= 2:
+        score += 0.05
+
+    return score
+
+
+def _mesh_search_terms(term: str) -> list[tuple[str, float]]:
+    """Build progressively broader MeSH search strategies."""
+    normalized = " ".join(term.split())
+    if not normalized:
+        return []
+    return [
+        (f'"{normalized}"[MeSH Terms]', 1.15),
+        (f"{normalized}[MeSH Terms]", 1.05),
+        (f'"{normalized}"', 0.95),
+        (normalized, 0.9),
+    ]
 
 
 def _parse_retry_after(value: str | None) -> float:
@@ -182,30 +255,70 @@ async def resolve_mesh_descriptor(
     Returns (descriptor_dict, translation_heading). descriptor_dict is None
     if no canonical descriptor was found.
     """
-    idlist, translation = await _esearch_mesh(
-        term, client, api_key, email, retmax=max_uids,
+    search_terms = _mesh_search_terms(term)
+    if not search_terms:
+        return None, None
+
+    best_descriptor: dict[str, Any] | None = None
+    best_confidence = 0.0
+    best_translation: str | None = None
+    descriptor_cache: dict[str, dict[str, Any]] = {}
+
+    for search_term, strategy_weight in search_terms:
+        idlist, translation = await _esearch_mesh(
+            search_term, client, api_key, email, retmax=max_uids,
+        )
+        if not idlist:
+            continue
+
+        for uid in idlist[:max_uids]:
+            if uid in descriptor_cache:
+                descriptor = descriptor_cache[uid]
+            else:
+                rec = await _esummary_mesh(uid, client, api_key, email)
+                if not rec:
+                    continue
+                parsed = _parse_descriptor(rec)
+                if not parsed:
+                    continue
+                descriptor_cache[uid] = parsed
+                descriptor = parsed
+
+            confidence = _score_descriptor(
+                descriptor,
+                input_term=term,
+                translation_term=translation,
+            ) * strategy_weight
+            if confidence <= best_confidence:
+                continue
+
+            best_confidence = confidence
+            best_descriptor = dict(descriptor)
+            best_descriptor["resolution_confidence"] = round(confidence, 3)
+            best_translation = translation
+
+            if confidence >= _EARLY_ACCEPT_CONFIDENCE:
+                return best_descriptor, best_translation
+
+    if best_descriptor is None:
+        return None, best_translation
+
+    term_token_count = len(_tokenize(term))
+    min_confidence = (
+        _MIN_CONFIDENCE_SINGLE_TOKEN
+        if term_token_count <= 1
+        else _MIN_CONFIDENCE_MULTI_TOKEN
     )
-    if not idlist:
-        return None, translation
+    if best_confidence < min_confidence:
+        logger.info(
+            "mesh_candidate_rejected_low_confidence",
+            term=term,
+            confidence=round(best_confidence, 3),
+            threshold=min_confidence,
+        )
+        return None, best_translation
 
-    translation_norm = _norm(translation) if translation else None
-    chosen: dict[str, Any] | None = None
-
-    for uid in idlist[:max_uids]:
-        rec = await _esummary_mesh(uid, client, api_key, email)
-        if not rec:
-            continue
-        desc = _parse_descriptor(rec)
-        if not desc:
-            continue
-
-        if translation_norm and _norm(str(desc.get("name", ""))) == translation_norm:
-            return desc, translation
-
-        if chosen is None:
-            chosen = desc
-
-    return chosen, translation
+    return best_descriptor, best_translation
 
 
 async def suggest_related_descriptors(
@@ -274,6 +387,7 @@ def descriptor_to_mesh_suggestion(
     tree_numbers = list(descriptor.get("tree_numbers", []))
     min_depth = descriptor.get("min_depth")
     scope_note = descriptor.get("scope_note")
+    resolution_confidence = descriptor.get("resolution_confidence")
 
     selected_entries = entry_terms[:5]
 
@@ -289,6 +403,11 @@ def descriptor_to_mesh_suggestion(
         qualifiers=MeshQualifiers(allowed=subheadings, selected=[]),
         tree_numbers=tree_numbers,
         min_depth=min_depth if isinstance(min_depth, int) else None,
+        resolution_confidence=(
+            float(resolution_confidence)
+            if isinstance(resolution_confidence, (float, int))
+            else None
+        ),
         explode=True,
         scope_note=scope_note[:300] if scope_note else None,
     )

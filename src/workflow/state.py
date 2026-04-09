@@ -59,6 +59,7 @@ class MeshDescriptor(BaseModel):
 
     descriptor_uid: str | None = None
     descriptor_name: str | None = None
+    resolution_confidence: float | None = None
     tree_numbers: list[str] = Field(default_factory=list)
     min_depth: int | None = None
 

@@ -1,6 +1,8 @@
 """Search request and status schemas for API endpoints."""
 
+from datetime import datetime
 from typing import Literal, Self
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -65,3 +67,27 @@ class SearchStatusResponse(BaseModel):
     sources_completed: list[SourceType] = Field(default_factory=list)
     sources_failed: list[SourceType] = Field(default_factory=list)
     progress_pct: int = Field(default=0, ge=0, le=100)
+
+
+class SearchHistoryItem(BaseModel):
+    """One search session in user history."""
+
+    id: UUID
+    query: str
+    query_type: str
+    search_mode: str
+    sources: list[str]
+    status: str
+    total_after_dedup: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SearchHistoryResponse(BaseModel):
+    """Cursor-paginated search history response."""
+
+    searches: list[SearchHistoryItem]
+    total: int
+    next_cursor: str | None = None

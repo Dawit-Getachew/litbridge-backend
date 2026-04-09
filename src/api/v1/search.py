@@ -7,11 +7,22 @@ from src.ai.adapters import translate_for_all_sources
 from src.ai.llm_client import LLMClient
 from src.api.v1.sse import stream_generator
 from src.core.exceptions import RateLimitError, SearchNotFoundError, SourceFetchError
-from src.core.deps import get_current_user_optional, get_llm_client, get_search_service, get_streaming_search_service
+from src.core.deps import (
+    get_current_user,
+    get_current_user_optional,
+    get_llm_client,
+    get_search_service,
+    get_streaming_search_service,
+)
 from src.models.user import User
 from src.schemas.enums import QueryType
 from src.schemas.records import PaginatedResults
-from src.schemas.search import SearchRequest, SearchResponse, SearchStatusResponse
+from src.schemas.search import (
+    SearchHistoryResponse,
+    SearchRequest,
+    SearchResponse,
+    SearchStatusResponse,
+)
 from src.services.pico_fill_service import fill_missing_pico
 from src.services.search_service import SearchService
 from src.services.streaming_search_service import StreamingSearchService
@@ -81,6 +92,21 @@ async def stream_search(
         )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@router.get("/search/history", response_model=SearchHistoryResponse)
+async def get_search_history(
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    service: SearchService = Depends(get_search_service),
+    user: User = Depends(get_current_user),
+) -> SearchHistoryResponse:
+    """Return cursor-paginated search history for the authenticated user."""
+    return await service.list_user_search_history(
+        user_id=str(user.id),
+        limit=limit,
+        cursor=cursor,
     )
 
 

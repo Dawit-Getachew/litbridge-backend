@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import json
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import SearchSession
@@ -58,6 +60,63 @@ class SearchRepository:
         )
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_user_sessions(self, user_id: UUID) -> int:
+        """Return the total number of search sessions owned by a user."""
+        stmt = (
+            select(func.count())
+            .select_from(SearchSession)
+            .where(SearchSession.user_id == user_id)
+        )
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
+
+    async def list_user_sessions_by_cursor(
+        self,
+        user_id: UUID,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> tuple[list[SearchSession], str | None]:
+        """List search sessions using keyset pagination ordered by recency."""
+        stmt = select(SearchSession).where(SearchSession.user_id == user_id)
+
+        decoded_cursor = self._decode_history_cursor(cursor)
+        if decoded_cursor is not None:
+            cursor_updated, cursor_created, cursor_id = decoded_cursor
+            stmt = stmt.where(
+                or_(
+                    SearchSession.updated_at < cursor_updated,
+                    and_(
+                        SearchSession.updated_at == cursor_updated,
+                        SearchSession.created_at < cursor_created,
+                    ),
+                    and_(
+                        SearchSession.updated_at == cursor_updated,
+                        SearchSession.created_at == cursor_created,
+                        SearchSession.id < cursor_id,
+                    ),
+                )
+            )
+
+        stmt = stmt.order_by(
+            SearchSession.updated_at.desc(),
+            SearchSession.created_at.desc(),
+            SearchSession.id.desc(),
+        ).limit(limit + 1)
+
+        rows = list((await self.db.execute(stmt)).scalars().all())
+        has_next = len(rows) > limit
+        sessions = rows[:limit]
+
+        next_cursor: str | None = None
+        if has_next and sessions:
+            last = sessions[-1]
+            next_cursor = self._encode_history_cursor(
+                updated_at=last.updated_at,
+                created_at=last.created_at,
+                session_id=last.id,
+            )
+
+        return sessions, next_cursor
 
     async def update_session(self, session: SearchSession) -> None:
         """Persist updates to an existing search session."""
@@ -132,3 +191,37 @@ class SearchRepository:
             return int(decoded)
         except (ValueError, UnicodeDecodeError):
             return 0
+
+    @staticmethod
+    def _encode_history_cursor(
+        *,
+        updated_at: datetime,
+        created_at: datetime,
+        session_id: UUID,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "u": updated_at.isoformat(),
+                "c": created_at.isoformat(),
+                "i": str(session_id),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("utf-8")
+
+    @staticmethod
+    def _decode_history_cursor(
+        cursor: str | None,
+    ) -> tuple[datetime, datetime, UUID] | None:
+        if not cursor:
+            return None
+
+        try:
+            payload = base64.urlsafe_b64decode(cursor.encode("utf-8")).decode("utf-8")
+            data = json.loads(payload)
+            updated_at = datetime.fromisoformat(str(data["u"]))
+            created_at = datetime.fromisoformat(str(data["c"]))
+            session_id = UUID(str(data["i"]))
+            return updated_at, created_at, session_id
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
