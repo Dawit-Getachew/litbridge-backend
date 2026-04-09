@@ -120,7 +120,8 @@ You are a biomedical search strategy expert. Generate keyword synonyms for \
 systematic review literature searching.
 
 For each base term provided, generate relevant synonyms that a researcher \
-would use to build a comprehensive search strategy.
+would use to build a comprehensive search strategy. You will also receive \
+the full PICO context so you understand the clinical domain.
 
 Return a JSON object with this exact schema:
 {
@@ -134,10 +135,17 @@ Return a JSON object with this exact schema:
 
 Rules:
 - Generate 3-7 synonyms per base term.
+- Each synonym must be usable as a direct substitute for the base term in a PubMed search \
+(i.e., searching for the synonym instead of the base term should retrieve similar articles).
 - Include medical synonyms, common abbreviations, spelling variants, and lay terms where applicable.
 - variant must be one of: synonym, abbreviation, spelling, lay_term, phrase_variant.
+- confidence must be >= 0.6 for each suggestion. Only suggest terms you are confident are valid synonyms.
 - Do NOT include the base term itself as a synonym.
 - Do NOT include overly broad or unrelated terms.
+- Do NOT suggest terms that belong to a different PICO component. For example, when expanding \
+Intervention terms, do NOT suggest disease names (those belong to Population). When expanding \
+Population terms, do NOT suggest drug names (those belong to Intervention).
+- Do NOT suggest full sentences or definitions. Each term should be a concise noun phrase (max ~5 words).
 - Prefer terms that would appear in biomedical literature titles and abstracts.
 - Return ONLY valid JSON, no markdown fences or explanation."""
 
@@ -181,14 +189,28 @@ def build_pico_fill_messages(
 def build_keyword_expansion_messages(
     concept: str,
     base_terms: list[str],
+    pico_context: dict[str, list[str]] | None = None,
 ) -> list[dict[str, str]]:
     """Build the message list for keyword expansion of one concept."""
     terms_str = ", ".join(f'"{t}"' for t in base_terms)
-    user_msg = (
-        f"Concept: {concept}\n"
-        f"Base terms to expand: {terms_str}\n\n"
-        f"Generate synonyms for each base term."
-    )
+    parts = [
+        f"Concept to expand: {concept}",
+        f"Base terms: {terms_str}",
+    ]
+
+    if pico_context:
+        parts.append("\nFull PICO context (for domain awareness, do NOT cross-suggest):")
+        labels = {"P": "Population", "I": "Intervention", "C": "Comparison", "O": "Outcome"}
+        for c in ("P", "I", "C", "O"):
+            targets = pico_context.get(c, [])
+            if targets:
+                label = labels[c]
+                marker = " <-- expand this" if c == concept else ""
+                parts.append(f"  {c} ({label}): {', '.join(targets)}{marker}")
+
+    parts.append("\nGenerate synonyms for each base term in the target concept only.")
+    user_msg = "\n".join(parts)
+
     return [
         {"role": "system", "content": KEYWORD_EXPANSION_SYSTEM},
         {"role": "user", "content": user_msg},

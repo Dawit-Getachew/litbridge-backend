@@ -1,4 +1,4 @@
-"""Unit tests for MeSH resolution ranking, fallback, and confidence gating."""
+"""Unit tests for MeSH resolution ranking, fallback, confidence gating, and keyword filtering."""
 
 from __future__ import annotations
 
@@ -7,6 +7,12 @@ from typing import Any
 import pytest
 
 from src.workflow import mesh_resolver
+from src.workflow.agents.keyword_agent import (
+    _collect_other_targets,
+    _deduplicate,
+    _is_relevant,
+)
+from src.workflow.state import Suggestion, WorkflowState
 
 
 def _descriptor_record(
@@ -24,6 +30,9 @@ def _descriptor_record(
         "ds_idxlinks": [{"treenum": tn} for tn in (tree_numbers or ["C14.280"])],
         "ds_scopenote": "",
     }
+
+
+# ── MeSH resolver tests ─────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -139,6 +148,35 @@ async def test_resolve_mesh_descriptor_uses_broader_fallback_strategy(
     assert descriptor["name"] == "Hypertension"
 
 
+@pytest.mark.asyncio
+async def test_resolve_rejects_overly_specific_descriptor_via_length_penalty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A descriptor name much longer than the input should be penalized."""
+
+    async def fake_esearch(*_args, **_kwargs) -> tuple[list[str], str | None]:
+        return ["u1"], None
+
+    async def fake_esummary(_uid: str, *_args, **_kwargs) -> dict[str, Any] | None:
+        return _descriptor_record(
+            "Receptors, Tumor Necrosis Factor, Type II",
+            uid="u1",
+            tree_numbers=["D12.776.543.750.705.852.420"],
+        )
+
+    monkeypatch.setattr(mesh_resolver, "_esearch_mesh", fake_esearch)
+    monkeypatch.setattr(mesh_resolver, "_esummary_mesh", fake_esummary)
+
+    descriptor, _ = await mesh_resolver.resolve_mesh_descriptor(
+        term="TNF",
+        client=None,  # type: ignore[arg-type]
+        api_key="",
+        email="",
+    )
+
+    assert descriptor is None
+
+
 def test_descriptor_to_mesh_suggestion_includes_resolution_confidence() -> None:
     """Mapped MeshDescriptor should expose resolver confidence when present."""
     suggestion = mesh_resolver.descriptor_to_mesh_suggestion(
@@ -157,3 +195,81 @@ def test_descriptor_to_mesh_suggestion_includes_resolution_confidence() -> None:
     )
 
     assert suggestion.resolution_confidence == 0.77
+
+
+def test_score_descriptor_applies_name_length_penalty() -> None:
+    """Descriptors with vastly more tokens than the input should score lower."""
+    short_desc = {"name": "Aspirin", "entry_terms": [], "min_depth": 2}
+    long_desc = {
+        "name": "Aspirin Related Gastrointestinal Hemorrhage Syndrome",
+        "entry_terms": [],
+        "min_depth": 2,
+    }
+
+    short_score = mesh_resolver._score_descriptor(
+        short_desc, input_term="aspirin", translation_term=None,
+    )
+    long_score = mesh_resolver._score_descriptor(
+        long_desc, input_term="aspirin", translation_term=None,
+    )
+
+    assert short_score > long_score
+
+
+# ── Keyword agent filtering tests ───────────────────────────────
+
+
+def test_is_relevant_rejects_terms_exceeding_max_length() -> None:
+    long_term = "x" * 81
+    assert _is_relevant(long_term, "metformin", 0.9, set()) is False
+
+
+def test_is_relevant_rejects_cross_concept_bleed() -> None:
+    assert _is_relevant("metformin", "diabetes", 0.9, {"metformin"}) is False
+
+
+def test_is_relevant_rejects_low_confidence() -> None:
+    assert _is_relevant("totally unrelated", "diabetes", 0.2, set()) is False
+
+
+def test_is_relevant_rejects_no_overlap_and_no_confidence() -> None:
+    assert _is_relevant("ocean waves", "diabetes", None, set()) is False
+
+
+def test_is_relevant_accepts_overlapping_term() -> None:
+    assert _is_relevant("type 2 diabetes mellitus", "type 2 diabetes", 0.8, set()) is True
+
+
+def test_is_relevant_accepts_high_confidence_even_without_overlap() -> None:
+    """Abbreviations like 'DM' share no tokens with 'diabetes' but are valid."""
+    assert _is_relevant("DM", "diabetes mellitus", 0.7, set()) is True
+
+
+def test_deduplicate_keeps_first_occurrence() -> None:
+    suggestions = [
+        Suggestion(term="Hypertension", concept="P", base_term="htn"),
+        Suggestion(term="hypertension", concept="P", base_term="htn"),
+        Suggestion(term="High BP", concept="P", base_term="htn"),
+    ]
+    result = _deduplicate(suggestions)
+    assert len(result) == 2
+    assert result[0].term == "Hypertension"
+    assert result[1].term == "High BP"
+
+
+def test_collect_other_targets_excludes_current_concept() -> None:
+    state = WorkflowState(
+        session_id="test",
+        question="test",
+        atomic_targets={
+            "P": ["diabetes"],
+            "I": ["metformin"],
+            "C": ["placebo"],
+            "O": ["mortality"],
+        },
+    )
+    others = _collect_other_targets(state, "I")
+    assert "metformin" not in others
+    assert "diabetes" in others
+    assert "placebo" in others
+    assert "mortality" in others

@@ -14,10 +14,14 @@ from src.workflow.state import Suggestion, WorkflowState
 logger = structlog.get_logger(__name__)
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", re.DOTALL)
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _VALID_VARIANTS = frozenset({
     "synonym", "abbreviation", "spelling", "lay_term", "phrase_variant",
 })
+
+_MIN_CONFIDENCE = 0.4
+_MAX_TERM_LENGTH = 80
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -42,6 +46,63 @@ def _safe_variant(val: object) -> str | None:
     return s if s in _VALID_VARIANTS else "synonym"
 
 
+def _tokenize(text: str) -> set[str]:
+    return {tok for tok in _TOKEN_RE.findall(text.lower()) if len(tok) > 1}
+
+
+def _collect_other_targets(
+    state: WorkflowState,
+    current_concept: str,
+) -> set[str]:
+    """Gather lowercased base terms from all PICO concepts except the current one."""
+    others: set[str] = set()
+    for concept in ("P", "I", "C", "O"):
+        if concept == current_concept:
+            continue
+        for target in state.atomic_targets.get(concept, []):
+            others.add(target.strip().lower())
+    return others
+
+
+def _is_relevant(
+    term: str,
+    base_term: str,
+    confidence: float | None,
+    other_targets: set[str],
+) -> bool:
+    """Reject suggestions with no lexical tie to the base term or cross-concept bleed."""
+    if len(term) > _MAX_TERM_LENGTH:
+        return False
+
+    if term.lower() in other_targets:
+        return False
+
+    if confidence is not None and confidence < _MIN_CONFIDENCE:
+        return False
+
+    base_tokens = _tokenize(base_term)
+    term_tokens = _tokenize(term)
+    has_overlap = bool(base_tokens & term_tokens)
+
+    if not has_overlap and (confidence is None or confidence < 0.5):
+        return False
+
+    return True
+
+
+def _deduplicate(suggestions: list[Suggestion]) -> list[Suggestion]:
+    """Drop case-insensitive duplicates, keeping first occurrence."""
+    seen: set[str] = set()
+    unique: list[Suggestion] = []
+    for s in suggestions:
+        key = s.term.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(s)
+    return unique
+
+
 async def run_keyword_expansion(
     state: WorkflowState,
     llm: LLMClient,
@@ -49,13 +110,20 @@ async def run_keyword_expansion(
     """Expand keywords for all PICO concepts and set awaiting to keywords_review.
 
     One LLM call per concept (batching all atomic targets for that concept).
+    Results are post-filtered for relevance, confidence, length, and dedup.
     """
     for concept in ("P", "I", "C", "O"):
         targets = state.atomic_targets.get(concept, [])
         if not targets:
             continue
 
-        messages = build_keyword_expansion_messages(concept, targets)
+        pico_context = {
+            c: state.atomic_targets.get(c, [])
+            for c in ("P", "I", "C", "O")
+        }
+        messages = build_keyword_expansion_messages(
+            concept, targets, pico_context=pico_context,
+        )
 
         payload = {
             "model": llm.model,
@@ -121,12 +189,14 @@ async def run_keyword_expansion(
         if concept not in state.synonyms:
             state.synonyms[concept] = {}
 
+        other_targets = _collect_other_targets(state, concept)
+
         for base_term, suggestions in keywords_raw.items():
             base_term = str(base_term).strip()
             if not base_term or not isinstance(suggestions, list):
                 continue
 
-            state.synonyms[concept][base_term] = [
+            raw_suggestions = [
                 Suggestion(
                     term=str(s.get("term", "")).strip(),
                     concept=concept,
@@ -138,6 +208,23 @@ async def run_keyword_expansion(
                 for s in suggestions
                 if isinstance(s, dict) and str(s.get("term", "")).strip()
             ]
+
+            filtered = [
+                s for s in raw_suggestions
+                if _is_relevant(s.term, base_term, s.confidence, other_targets)
+            ]
+
+            rejected_count = len(raw_suggestions) - len(filtered)
+            if rejected_count:
+                logger.debug(
+                    "keyword_suggestions_filtered",
+                    concept=concept,
+                    base_term=base_term,
+                    rejected=rejected_count,
+                    kept=len(filtered),
+                )
+
+            state.synonyms[concept][base_term] = _deduplicate(filtered)
 
     state.awaiting = "keywords_review"
 

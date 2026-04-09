@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 import httpx
 import structlog
@@ -15,6 +16,14 @@ from src.workflow.state import PicoElement, WorkflowState
 
 logger = structlog.get_logger(__name__)
 
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or",
+    "is", "are", "was", "were", "with", "by", "from", "as", "be", "not",
+    "no", "its", "it", "this", "that", "has", "have", "had",
+})
+_MAX_RELATED_PER_CONCEPT = 2
+
 STANDARD_COMPARATORS = [
     "placebo",
     "standard of care",
@@ -22,6 +31,14 @@ STANDARD_COMPARATORS = [
     "no intervention",
     "watchful waiting",
 ]
+
+
+def _tokenize_meaningful(text: str) -> set[str]:
+    """Tokenize and remove stopwords for relevance comparison."""
+    return {
+        tok for tok in _TOKEN_RE.findall(text.lower())
+        if len(tok) > 1 and tok not in _STOPWORDS
+    }
 
 
 async def run_pico_recommendation(
@@ -109,7 +126,7 @@ def _ensure_standard_comparators(state: WorkflowState) -> None:
                 text=comparator,
                 confidence=0.6,
                 inferred=True,
-                provenance="llm",
+                provenance="mesh",
                 facet="specific_agent",
             ))
             if comparator not in existing_targets:
@@ -123,9 +140,8 @@ def _apply_related_to_weak(
 ) -> None:
     """Use related MeSH descriptors to suggest terms for weak PICO concepts.
 
-    Heuristic: related descriptors from strong concepts can inform weak
-    concepts based on MeSH tree category prefixes (C = diseases, E = procedures,
-    G = phenomena, L = information science, N = health care).
+    Only adds siblings that share at least one meaningful token with the
+    original question, capped at _MAX_RELATED_PER_CONCEPT per concept.
     """
     concept_tree_prefixes = {
         "P": {"C", "F", "M"},
@@ -133,6 +149,9 @@ def _apply_related_to_weak(
         "C": {"D", "E"},
         "O": {"C", "E", "F", "G", "L", "N"},
     }
+
+    question_tokens = _tokenize_meaningful(state.question)
+    added_per_concept: dict[str, int] = {c: 0 for c in weak_concepts}
 
     for desc in related:
         name = str(desc.get("name", "")).strip()
@@ -142,9 +161,21 @@ def _apply_related_to_weak(
         if not tree_nums:
             continue
 
+        name_tokens = _tokenize_meaningful(name)
+        if not (name_tokens & question_tokens):
+            logger.debug(
+                "pico_related_skipped_no_overlap",
+                name=name,
+                question_tokens=sorted(question_tokens)[:10],
+            )
+            continue
+
         top_categories = {tn.split(".")[0][0] for tn in tree_nums if tn}
 
         for concept in weak_concepts:
+            if added_per_concept[concept] >= _MAX_RELATED_PER_CONCEPT:
+                continue
+
             preferred_prefixes = concept_tree_prefixes.get(concept, set())
             if not top_categories & preferred_prefixes:
                 continue
@@ -157,9 +188,10 @@ def _apply_related_to_weak(
                 text=name,
                 confidence=0.4,
                 inferred=True,
-                provenance="llm",
+                provenance="mesh",
                 facet=None,
             ))
             if name not in state.atomic_targets.get(concept, []):
                 state.atomic_targets.setdefault(concept, []).append(name)
+            added_per_concept[concept] += 1
             break

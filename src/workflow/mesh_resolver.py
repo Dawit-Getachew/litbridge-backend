@@ -22,8 +22,8 @@ _rate_lock = asyncio.Lock()
 _last_request_at: float = 0.0
 _MIN_REQUEST_INTERVAL = 0.12  # ~8 req/s, headroom under NCBI's 10/s limit
 _MAX_RETRIES = 3
-_MIN_CONFIDENCE_SINGLE_TOKEN = 0.35
-_MIN_CONFIDENCE_MULTI_TOKEN = 0.45
+_MIN_CONFIDENCE_SINGLE_TOKEN = 0.40
+_MIN_CONFIDENCE_MULTI_TOKEN = 0.50
 _EARLY_ACCEPT_CONFIDENCE = 1.0
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -84,7 +84,10 @@ def _score_descriptor(
     if isinstance(min_depth, int) and min_depth >= 2:
         score += 0.05
 
-    return score
+    if input_tokens and name_tokens and len(name_tokens) >= 3 * len(input_tokens):
+        score -= 0.15
+
+    return max(score, 0.0)
 
 
 def _mesh_search_terms(term: str) -> list[tuple[str, float]]:
@@ -96,7 +99,7 @@ def _mesh_search_terms(term: str) -> list[tuple[str, float]]:
         (f'"{normalized}"[MeSH Terms]', 1.15),
         (f"{normalized}[MeSH Terms]", 1.05),
         (f'"{normalized}"', 0.95),
-        (normalized, 0.9),
+        (normalized, 0.80),
     ]
 
 
@@ -313,6 +316,7 @@ async def resolve_mesh_descriptor(
         logger.info(
             "mesh_candidate_rejected_low_confidence",
             term=term,
+            best_name=best_descriptor.get("name") if best_descriptor else None,
             confidence=round(best_confidence, 3),
             threshold=min_confidence,
         )
