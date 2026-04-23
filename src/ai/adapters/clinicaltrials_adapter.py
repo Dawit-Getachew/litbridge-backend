@@ -20,7 +20,15 @@ class ClinicalTrialsAdapter(BaseQueryAdapter):
         query_type: QueryType,
         pico: PICOInput | None = None,
     ) -> str:
-        """Translate input into a short keyword query."""
+        """Translate input into a short keyword query.
+
+        ClinicalTrials.gov V2's ``query.term`` is a keyword-style engine —
+        long natural-language queries with prepositions/articles do worse
+        than 3-8 high-signal medical terms. We keep the keyword-extraction
+        approach for FREE mode but use the trimmed stop-word list (so
+        biomedical-meaningful tokens like "trial", "effect", "treatment"
+        survive) and allow up to 8 candidate terms before downselecting.
+        """
         if query_type is QueryType.PICO:
             terms = self._extract_pico_terms(pico, fallback=query)
             return self._to_keyword_query(terms, min_terms=2, max_terms=5)
@@ -30,7 +38,7 @@ class ClinicalTrialsAdapter(BaseQueryAdapter):
             return self._to_keyword_query(terms, min_terms=3, max_terms=5)
 
         simplified = self._simplify_syntax(query)
-        terms = self._extract_keywords(simplified, max_terms=6)
+        terms = self._extract_keywords(simplified, max_terms=8)
         return self._to_keyword_query(terms, min_terms=3, max_terms=5)
 
     def _simplify_syntax(self, query: str) -> str:

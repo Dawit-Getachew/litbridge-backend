@@ -11,7 +11,7 @@ import urllib.request
 from typing import Any
 
 from src.core.exceptions import SourceFetchError
-from src.repositories.base_repo import BaseSourceRepository
+from src.repositories.base_repo import BaseSourceRepository, SortMode
 from src.schemas.enums import SourceType
 from src.schemas.records import RawRecord
 
@@ -25,8 +25,20 @@ class ClinicalTrialsRepository(BaseSourceRepository):
     _PAGE_SIZE = 100
     _FALLBACK_USER_AGENT = "LitBridge/1.0 (+https://litbridge.local)"
 
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
-        """Search studies by query.term with page-token pagination."""
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: SortMode = "relevance",
+    ) -> list[RawRecord]:
+        """Search studies by query.term with page-token pagination.
+
+        ClinicalTrials.gov V2 returns studies in relevance order by default
+        when ``query.term`` is supplied (Best Match scoring on title, conditions
+        and interventions). For BOOLEAN/PRISMA we ask for newest-first by start
+        date. The ``sort_mode`` argument is plumbed for parity with the other
+        sources even though the relevance branch is just the API default.
+        """
         if not query.strip() or max_results <= 0:
             return []
 
@@ -38,6 +50,8 @@ class ClinicalTrialsRepository(BaseSourceRepository):
                 "query.term": query,
                 "pageSize": min(self._PAGE_SIZE, max_results),
             }
+            if sort_mode == "date":
+                params["sort"] = "StartDate:desc"
             if page_token:
                 params["pageToken"] = page_token
 
@@ -66,7 +80,7 @@ class ClinicalTrialsRepository(BaseSourceRepository):
             if not page_token:
                 break
 
-        return records[:max_results]
+        return self._assign_source_ranks(records[:max_results])
 
     async def fetch_by_id(self, source_id: str) -> RawRecord | None:
         """Fetch a single clinical study by NCT id."""

@@ -82,6 +82,7 @@ def get_fetcher_service(request: Request) -> FetcherService:
         client=get_http_client(request),
         redis_client=get_redis(request),
         settings=get_settings(),
+        llm_client=get_llm_client(request),
     )
 
 

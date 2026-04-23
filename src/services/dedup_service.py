@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import structlog
 from rapidfuzz import fuzz
 
+from src.core.config import Settings, get_settings
 from src.core.exceptions import DeduplicationError
-from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyType
+from src.schemas.enums import AgeGroup, OAStatus, QueryType, SourceType, StudyType
 from src.schemas.records import RawRecord, UnifiedRecord
 
 
@@ -54,11 +56,66 @@ class DedupService:
     FUZZY_TITLE_THRESHOLD = 90
     SOFT_MATCH_WINDOW = 10
 
-    def __init__(self) -> None:
-        self.logger = structlog.get_logger(__name__).bind(service="dedup_service")
+    # Tokens that carry no retrieval signal and should be dropped from the
+    # query before computing the title-match boost. Kept in sync with
+    # ``src/ai/adapters/base.py``'s trimmed ``_STOP_WORDS``.
+    _BOOST_STOP_WORDS: frozenset[str] = frozenset(
+        {
+            "a",
+            "an",
+            "and",
+            "are",
+            "as",
+            "at",
+            "be",
+            "by",
+            "does",
+            "for",
+            "from",
+            "how",
+            "in",
+            "into",
+            "is",
+            "it",
+            "of",
+            "on",
+            "or",
+            "that",
+            "the",
+            "to",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+            "without",
+        }
+    )
 
-    def deduplicate(self, records: list[RawRecord]) -> list[UnifiedRecord]:
-        """Deduplicate records into unified golden records."""
+    # Pattern for extracting meaningful ≥3-char tokens from titles/queries.
+    _TOKEN_PATTERN: re.Pattern[str] = re.compile(r"[a-z0-9\-]{3,}")
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.logger = structlog.get_logger(__name__).bind(service="dedup_service")
+        self.settings = settings or get_settings()
+
+    def deduplicate(
+        self,
+        records: list[RawRecord],
+        query: str | None = None,
+        query_type: QueryType | None = None,
+    ) -> list[UnifiedRecord]:
+        """Deduplicate records into unified golden records.
+
+        When ``query`` is provided and ``query_type`` is not BOOLEAN, clusters
+        are re-ordered by a weighted Reciprocal Rank Fusion score combined
+        with title-match and recency boosts (configurable via ``RANKING_*``
+        settings). BOOLEAN queries keep their source-default (date) order to
+        preserve PRISMA reproducibility. When ``query`` is ``None`` or every
+        record has ``source_rank == 0`` (legacy callers / tests), the existing
+        first-seen ordering is returned unchanged — so backward compatibility
+        is preserved by construction.
+        """
         if not records:
             return []
 
@@ -81,9 +138,24 @@ class DedupService:
             )
 
             clusters = self._build_clusters(records=records, union_find=union_find)
+            rrf_applied = self._should_apply_rrf(
+                query=query,
+                query_type=query_type,
+                clusters=clusters,
+            )
+            if rrf_applied:
+                ordered_clusters = self._rank_clusters_by_rrf(
+                    clusters=clusters, query=query,
+                )
+                ordered_clusters, mmr_applied = self._maybe_mmr_rerank(
+                    clusters=ordered_clusters, query=query,
+                )
+            else:
+                ordered_clusters = clusters
+                mmr_applied = False
             unified = [
                 self._build_golden_record(cluster=cluster)
-                for cluster in clusters
+                for cluster in ordered_clusters
             ]
 
             self.logger.info(
@@ -91,6 +163,13 @@ class DedupService:
                 input_records=len(records),
                 output_records=len(unified),
                 duplicates_removed=len(records) - len(unified),
+                rrf_applied=rrf_applied,
+                mmr_applied=mmr_applied,
+                query_type=query_type.value if query_type else None,
+                top5_sources=[
+                    self._pick_winner(cluster).source.value
+                    for cluster in ordered_clusters[:5]
+                ],
             )
             return unified
         except Exception as exc:  # pragma: no cover - defensive wrapping
@@ -101,6 +180,242 @@ class DedupService:
                 error=str(exc),
             )
             raise DeduplicationError("Failed to deduplicate records.") from exc
+
+    def _should_apply_rrf(
+        self,
+        query: str | None,
+        query_type: QueryType | None,
+        clusters: list[list[RawRecord]],
+    ) -> bool:
+        """Decide whether to re-rank clusters with weighted RRF.
+
+        RRF is only applied when we have (a) a user-provided query to
+        compute a title-match boost against, (b) a non-BOOLEAN query type
+        (BOOLEAN is PRISMA-style; reviewers expect date-sorted output), and
+        (c) at least one record carrying a non-zero ``source_rank`` so the
+        RRF sum is non-degenerate. Any failure of these conditions falls
+        back to the existing first-seen ordering — which is exactly what
+        legacy tests and the workflow service expect.
+        """
+        if not query or not query.strip():
+            return False
+        if query_type is QueryType.BOOLEAN:
+            return False
+        for cluster in clusters:
+            for record in cluster:
+                if record.source_rank and record.source_rank > 0:
+                    return True
+        return False
+
+    def _rank_clusters_by_rrf(
+        self,
+        clusters: list[list[RawRecord]],
+        query: str | None,
+    ) -> list[list[RawRecord]]:
+        """Sort clusters by fused RRF score (+boosts) with deterministic ties.
+
+        The sort key is, in order of priority:
+
+            1. Descending fused score (RRF × title_boost × recency_boost)
+            2. Descending publication year (newer wins at equal fused score)
+            3. Descending distinct-source count (multi-source cluster wins)
+            4. Ascending winner source enum value (alphabetical, stable)
+            5. Ascending winner source_id (lexicographic tiebreaker of last
+               resort, guarantees two identical runs return identical orders)
+        """
+        query_terms = self._query_terms(query)
+        current_year = datetime.now(UTC).year
+
+        scored: list[tuple[tuple[float, int, int, str, str], list[RawRecord]]] = []
+        for cluster in clusters:
+            winner = self._pick_winner(cluster)
+            fused = self._fused_score(
+                cluster=cluster,
+                winner=winner,
+                query_terms=query_terms,
+                current_year=current_year,
+            )
+            sort_key = (
+                -fused,
+                -(winner.year or 0),
+                -len({record.source for record in cluster}),
+                winner.source.value,
+                winner.source_id,
+            )
+            scored.append((sort_key, cluster))
+
+        scored.sort(key=lambda entry: entry[0])
+        return [cluster for _, cluster in scored]
+
+    def _maybe_mmr_rerank(
+        self,
+        clusters: list[list[RawRecord]],
+        query: str | None,
+    ) -> tuple[list[list[RawRecord]], bool]:
+        """Diversify the top-K clusters with Maximal Marginal Relevance.
+
+        Applies only when ``RANKING_MMR_LAMBDA < 1.0`` (default 1.0 = off)
+        and we have at least two clusters to reorder. Runs over the already
+        RRF-sorted input so the long tail past ``RANKING_MMR_K`` stays in
+        pure relevance order; only the head gets the diversity pass.
+
+        Similarity is Jaccard over normalized title tokens — fast, no
+        embeddings, deterministic. ``lambda`` balances relevance vs.
+        diversity (1.0 pure relevance, 0.0 pure diversity).
+
+        Returns ``(reordered_clusters, applied)`` so the caller can log
+        whether MMR actually ran.
+        """
+        lam = self.settings.RANKING_MMR_LAMBDA
+        if lam >= 1.0 or lam < 0.0 or len(clusters) < 2:
+            return clusters, False
+
+        k = min(self.settings.RANKING_MMR_K, len(clusters))
+        if k < 2:
+            return clusters, False
+
+        query_terms = self._query_terms(query)
+        current_year = datetime.now(UTC).year
+
+        head = clusters[:k]
+        tail = clusters[k:]
+
+        winners: list[RawRecord] = [self._pick_winner(cluster) for cluster in head]
+        title_tokens: list[frozenset[str]] = [
+            frozenset(self._TOKEN_PATTERN.findall((winner.title or "").lower()))
+            for winner in winners
+        ]
+        fused_scores: list[float] = [
+            self._fused_score(
+                cluster=cluster,
+                winner=winner,
+                query_terms=query_terms,
+                current_year=current_year,
+            )
+            for cluster, winner in zip(head, winners, strict=True)
+        ]
+
+        remaining: list[int] = list(range(len(head)))
+        selected: list[int] = [remaining.pop(0)]
+
+        while remaining and len(selected) < k:
+            best_index: int | None = None
+            best_score: float | None = None
+            for candidate in remaining:
+                max_sim = max(
+                    (
+                        self._jaccard_similarity(
+                            title_tokens[candidate], title_tokens[chosen],
+                        )
+                        for chosen in selected
+                    ),
+                    default=0.0,
+                )
+                score = lam * fused_scores[candidate] - (1.0 - lam) * max_sim
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_index = candidate
+            assert best_index is not None  # noqa: S101 - loop guarantees a pick
+            selected.append(best_index)
+            remaining.remove(best_index)
+
+        reordered_head = [head[index] for index in selected]
+        return reordered_head + tail, True
+
+    @staticmethod
+    def _jaccard_similarity(
+        left: frozenset[str],
+        right: frozenset[str],
+    ) -> float:
+        """Return Jaccard similarity over title-token sets in [0, 1]."""
+        if not left or not right:
+            return 0.0
+        intersection = len(left & right)
+        if intersection == 0:
+            return 0.0
+        return intersection / len(left | right)
+
+    def _fused_score(
+        self,
+        cluster: list[RawRecord],
+        winner: RawRecord,
+        query_terms: frozenset[str],
+        current_year: int,
+    ) -> float:
+        """Compute weighted RRF × title_boost × recency_boost for one cluster."""
+        rrf_k = self.settings.RANKING_RRF_K
+        source_weight = {
+            SourceType.PUBMED: self.settings.RANKING_PUBMED_WEIGHT,
+            SourceType.EUROPEPMC: 1.0,
+            SourceType.OPENALEX: 1.0,
+            SourceType.CLINICALTRIALS: 1.0,
+        }
+
+        rrf = 0.0
+        for record in cluster:
+            if not record.source_rank or record.source_rank <= 0:
+                continue
+            rrf += source_weight.get(record.source, 1.0) / (rrf_k + record.source_rank)
+
+        if rrf <= 0.0:
+            # No rank info available for this cluster. Zero means it lands at
+            # the very end after sort; combined with the deterministic
+            # tiebreakers, this preserves first-seen order among unranked
+            # clusters (critical for backward compatibility).
+            return 0.0
+
+        title_boost = self._title_match_boost(winner.title, query_terms)
+        recency_boost = self._recency_boost(winner.year, current_year=current_year)
+        return rrf * title_boost * recency_boost
+
+    def _title_match_boost(self, title: str | None, query_terms: frozenset[str]) -> float:
+        """Return 1.0..(1.0 + alpha) based on query-term coverage in title.
+
+        A title that contains every meaningful query term gets the full
+        ``1 + RANKING_TITLE_BOOST`` lift. Partial coverage scales linearly.
+        Short stop-word-only queries (e.g. ``"of the"``) are treated as
+        neutral (1.0) to avoid artificially boosting every paper.
+        """
+        alpha = self.settings.RANKING_TITLE_BOOST
+        if alpha <= 0.0 or not title or not query_terms:
+            return 1.0
+        title_tokens = set(self._TOKEN_PATTERN.findall(title.lower()))
+        if not title_tokens:
+            return 1.0
+        matched = len(query_terms & title_tokens)
+        return 1.0 + alpha * (matched / len(query_terms))
+
+    def _recency_boost(self, year: int | None, *, current_year: int) -> float:
+        """Return 1.0..(1.0 + beta) decaying linearly over 5 years.
+
+        Current-year papers get the full lift; age 5+ (or missing year) is
+        neutral. Cap keeps an outstanding older paper from being displaced
+        by a mediocre recent one.
+        """
+        beta = self.settings.RANKING_RECENCY_BOOST
+        if beta <= 0.0 or not year:
+            return 1.0
+        age = max(0, current_year - year)
+        if age >= 5:
+            return 1.0
+        return 1.0 + beta * (1.0 - age / 5.0)
+
+    def _query_terms(self, query: str | None) -> frozenset[str]:
+        """Tokenize a query into lowercased ≥3-char tokens minus stop-words."""
+        if not query:
+            return frozenset()
+        tokens = {
+            token
+            for token in self._TOKEN_PATTERN.findall(query.lower())
+            if token not in self._BOOST_STOP_WORDS
+        }
+        return frozenset(tokens)
+
+    def _pick_winner(self, cluster: list[RawRecord]) -> RawRecord:
+        """Return the cluster's representative record (same heuristic as
+        ``_build_golden_record``'s ``base`` selection, so ranking signals and
+        the persisted UnifiedRecord stay consistent)."""
+        return max(cluster, key=lambda record: self._completeness_score(record))
 
     def _apply_doi_hard_match(self, union_find: _UnionFind, normalized_dois: list[str | None]) -> None:
         doi_groups: dict[str, list[int]] = defaultdict(list)
@@ -194,10 +509,7 @@ class DedupService:
     def _build_golden_record(self, cluster: list[RawRecord]) -> UnifiedRecord:
         cluster_id = str(uuid4())
 
-        base = max(
-            cluster,
-            key=lambda record: self._completeness_score(record),
-        )
+        base = self._pick_winner(cluster)
 
         title = base.title.strip() or self._first_non_empty_string(cluster, "title") or ""
         authors = list(base.authors) if base.authors else self._first_non_empty_list(cluster, "authors")

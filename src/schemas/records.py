@@ -56,3 +56,7 @@ class RawRecord(BaseModel):
     pdf_url: str | None = None
     oa_status: OAStatus = OAStatus.UNKNOWN
     raw_data: dict[str, Any] = Field(default_factory=dict)
+    # Internal-only ranking signal: 1-based position in the source's relevance-
+    # sorted result list. 0 means "unranked" (e.g. legacy cached records). Not
+    # exposed in UnifiedRecord / API responses.
+    source_rank: int = 0

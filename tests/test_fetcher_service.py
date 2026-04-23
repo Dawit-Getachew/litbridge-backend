@@ -92,6 +92,7 @@ async def test_fetch_all_sources_returns_combined_results(monkeypatch: pytest.Mo
         repositories[source].search.assert_awaited_once_with(
             query=f"{source.value} translated",
             max_results=100,
+            sort_mode="relevance",
         )
 
 
@@ -149,7 +150,11 @@ async def test_quick_mode_caps_results_per_source(monkeypatch: pytest.MonkeyPatc
             max_results=500,
         )
 
-    repository.search.assert_awaited_once_with(query="translated query", max_results=50)
+    repository.search.assert_awaited_once_with(
+        query="translated query",
+        max_results=50,
+        sort_mode="relevance",
+    )
 
 
 @pytest.mark.asyncio
@@ -173,7 +178,71 @@ async def test_deep_research_mode_allows_full_results(monkeypatch: pytest.Monkey
             max_results=140,
         )
 
-    repository.search.assert_awaited_once_with(query="translated query", max_results=140)
+    repository.search.assert_awaited_once_with(
+        query="translated query",
+        max_results=140,
+        sort_mode="relevance",
+    )
+
+
+@pytest.mark.asyncio
+async def test_boolean_query_type_uses_date_sort_for_prisma_reproducibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BOOLEAN searches must keep date-sorted source order for PRISMA audits."""
+    source = SourceType.PUBMED
+    translator = AsyncMock(return_value={source: "(metformin) AND (cardiovascular)"})
+    repository = StubRepository([])
+    fake_redis = FakeRedis()
+
+    monkeypatch.setattr("src.services.fetcher_service.translate_for_all_sources", translator)
+    monkeypatch.setattr("src.services.fetcher_service.get_repository", lambda source, client: repository)
+
+    async with httpx.AsyncClient() as client:
+        service = FetcherService(client=client, redis_client=fake_redis, settings=get_settings())
+        await service.fetch_all_sources(
+            query="(metformin) AND (cardiovascular)",
+            query_type=QueryType.BOOLEAN,
+            search_mode=SearchMode.DEEP_RESEARCH,
+            sources=[source],
+            max_results=200,
+        )
+
+    repository.search.assert_awaited_once_with(
+        query="(metformin) AND (cardiovascular)",
+        max_results=200,
+        sort_mode="date",
+    )
+
+
+@pytest.mark.asyncio
+async def test_free_text_query_type_uses_relevance_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FREE/ABSTRACT/PICO must request the source's relevance ranking."""
+    source = SourceType.PUBMED
+    translator = AsyncMock(return_value={source: "metformin cardiovascular"})
+    repository = StubRepository([])
+    fake_redis = FakeRedis()
+
+    monkeypatch.setattr("src.services.fetcher_service.translate_for_all_sources", translator)
+    monkeypatch.setattr("src.services.fetcher_service.get_repository", lambda source, client: repository)
+
+    async with httpx.AsyncClient() as client:
+        service = FetcherService(client=client, redis_client=fake_redis, settings=get_settings())
+        await service.fetch_all_sources(
+            query="metformin cardiovascular",
+            query_type=QueryType.FREE,
+            search_mode=SearchMode.DEEP_RESEARCH,
+            sources=[source],
+            max_results=80,
+        )
+
+    repository.search.assert_awaited_once_with(
+        query="metformin cardiovascular",
+        max_results=80,
+        sort_mode="relevance",
+    )
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from redis.asyncio import Redis
 from src.ai.llm_client import LLMClient
 from src.core.config import Settings
 from src.core.exceptions import SearchNotFoundError
-from src.schemas.enums import SearchMode, SourceType
+from src.schemas.enums import QueryType, SearchMode, SourceType
 from src.services.dedup_service import DedupService
 from src.services.fetcher_service import FetcherService
 from src.repositories import get_repository
@@ -406,11 +406,20 @@ class WorkflowService:
         sources_completed: list[str] = []
         sources_failed: list[str] = []
 
+        # The agentic workflow always emits BOOLEAN queries (PRISMA-style),
+        # so source-side ordering should be reproducible chronological — same
+        # convention as the FetcherService BOOLEAN path.
+        sort_mode = FetcherService._sort_mode_for_query_type(QueryType.BOOLEAN)
+
         async def fetch_one(source: SourceType) -> tuple[SourceType, list[RawRecord], str | None]:
             repo = get_repository(source=source, client=self.http_client)
             q = query_map.get(source, state.structured_query.pubmed_query)
             try:
-                records = await repo.search(query=q, max_results=effective_max)
+                records = await repo.search(
+                    query=q,
+                    max_results=effective_max,
+                    sort_mode=sort_mode,  # type: ignore[arg-type]
+                )
                 return source, records, None
             except Exception as exc:
                 return source, [], str(exc)
@@ -426,7 +435,15 @@ class WorkflowService:
                 all_raw.extend(records)
                 sources_completed.append(source.value)
 
-        unified = self.dedup.deduplicate(all_raw)
+        # Workflow path is always BOOLEAN/PRISMA-style. Pass the query so the
+        # dedup service can record it for observability, and pass query_type so
+        # the RRF fast-path is bypassed in favor of the existing first-seen
+        # (date-sorted) ordering reviewers expect for systematic-review work.
+        unified = self.dedup.deduplicate(
+            all_raw,
+            query=search_request.query,
+            query_type=QueryType.BOOLEAN,
+        )
         search_id = str(session.id)
 
         session.status = "completed"

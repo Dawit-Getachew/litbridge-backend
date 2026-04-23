@@ -13,6 +13,7 @@ from redis import RedisError
 from redis.asyncio import Redis
 
 from src.ai.adapters import translate_for_all_sources
+from src.ai.llm_client import LLMClient
 from src.core.config import Settings
 from src.repositories import get_repository
 from src.schemas.enums import QueryType, SearchMode, SourceType
@@ -25,10 +26,17 @@ class FetcherService:
 
     CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 hours
 
-    def __init__(self, client: httpx.AsyncClient, redis_client: Redis, settings: Settings) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        redis_client: Redis,
+        settings: Settings,
+        llm_client: LLMClient | None = None,
+    ) -> None:
         self.client = client
         self.redis_client = redis_client
         self.settings = settings
+        self.llm_client = llm_client
         self.logger = structlog.get_logger(__name__).bind(service="fetcher_service")
 
     async def fetch_all_sources(
@@ -72,7 +80,12 @@ class FetcherService:
             query_type=query_type,
             pico=pico,
             sources=sources,
+            llm_client=self.llm_client,
+            redis_client=self.redis_client,
+            settings=self.settings,
         )
+
+        sort_mode = self._sort_mode_for_query_type(query_type)
 
         started_at = time.perf_counter()
         source_results = await asyncio.gather(
@@ -81,6 +94,7 @@ class FetcherService:
                     source=source,
                     translated_query=translated_queries.get(source, query),
                     max_results=effective_max_results,
+                    sort_mode=sort_mode,
                 )
                 for source in sources
             ],
@@ -116,12 +130,22 @@ class FetcherService:
 
         return all_records, source_counts, failed_sources
 
-    async def _fetch_source(self, source: SourceType, translated_query: str, max_results: int) -> list[RawRecord]:
+    async def _fetch_source(
+        self,
+        source: SourceType,
+        translated_query: str,
+        max_results: int,
+        sort_mode: str = "relevance",
+    ) -> list[RawRecord]:
         """Fetch one source and emit structured timing logs."""
         repository = get_repository(source=source, client=self.client)
         started_at = time.perf_counter()
         try:
-            records = await repository.search(query=translated_query, max_results=max_results)
+            records = await repository.search(
+                query=translated_query,
+                max_results=max_results,
+                sort_mode=sort_mode,  # type: ignore[arg-type]
+            )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             self.logger.warning(
@@ -153,15 +177,42 @@ class FetcherService:
         return normalized_requested
 
     @staticmethod
-    def _build_cache_key(query: str, sources: list[SourceType], mode: SearchMode) -> str:
-        """Build a deterministic key: litbridge:search:{hash}:raw."""
+    def _sort_mode_for_query_type(query_type: QueryType) -> str:
+        """Map a query type to the per-source sort mode.
+
+        BOOLEAN searches are PRISMA-style protocols where reviewers expect a
+        stable, source-default chronological order so the result set can be
+        reproduced. Every other query type benefits from each source's native
+        relevance ranking, which is then fused via RRF in DedupService.
+        """
+        if query_type is QueryType.BOOLEAN:
+            return "date"
+        return "relevance"
+
+    def _build_cache_key(self, query: str, sources: list[SourceType], mode: SearchMode) -> str:
+        """Build a deterministic key: litbridge:search:{ranking_version}:{hash}:raw.
+
+        The ``RANKING_VERSION`` segment lives in the key *prefix* (not just the
+        hash payload) so that:
+
+        * Bumping the version creates an entirely new keyspace, instantly
+          invalidating every pre-existing entry without waiting on TTL.
+        * Operators can ``SCAN MATCH litbridge:search:v2:*`` to inspect or
+          purge a specific generation of cached results.
+        * Reverting ``RANKING_VERSION`` to a prior string is a zero-deploy
+          rollback path — the previous keyspace becomes live again.
+
+        Old ``v1`` keys (if any) will naturally age out via TTL.
+        """
+        ranking_version = self.settings.RANKING_VERSION
         payload = {
             "query": query,
             "sources": sorted(source.value for source in sources),
             "mode": mode.value,
+            "ranking_version": ranking_version,
         }
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-        return f"litbridge:search:{digest}:raw"
+        return f"litbridge:search:{ranking_version}:{digest}:raw"
 
     async def _cache_get(
         self,

@@ -14,8 +14,11 @@ from src.schemas.pico import PICOInput
 
 
 @pytest.mark.asyncio
-async def test_pubmed_adapter_translates_free_text_to_boolean_with_field_tags() -> None:
-    """Free-text queries should become tagged PubMed Boolean blocks."""
+async def test_pubmed_adapter_passes_free_text_through_for_atm() -> None:
+    """Free-text queries should pass through as natural language so PubMed's
+    Automatic Term Mapping (ATM) can expand MeSH/synonyms/spelling. Wrapping
+    each token in [tiab]/[MeSH] used to silently disable ATM and narrow recall.
+    """
     adapter = PubMedAdapter()
 
     translated = await adapter.translate(
@@ -24,10 +27,100 @@ async def test_pubmed_adapter_translates_free_text_to_boolean_with_field_tags() 
     )
 
     assert translated
-    assert "[tiab]" in translated
-    assert "[MeSH]" in translated
-    assert "AND" in translated
+    assert "[tiab]" not in translated
+    assert "[MeSH]" not in translated
     assert "metformin" in translated.lower()
+    assert "cardiovascular" in translated.lower()
+    assert "risk" in translated.lower()
+
+
+@pytest.mark.asyncio
+async def test_pubmed_adapter_strips_user_supplied_brackets_in_free_mode() -> None:
+    """Bare ``[`` / ``]`` in user input must be stripped so PubMed doesn't
+    interpret them as field tags (which would silently disable ATM)."""
+    adapter = PubMedAdapter()
+
+    translated = await adapter.translate(
+        query="Impact of [GLP-1 agonists] on cholesterol",
+        query_type=QueryType.FREE,
+    )
+
+    assert "[" not in translated
+    assert "]" not in translated
+    assert "GLP-1 agonists" in translated
+    assert "cholesterol" in translated
+
+
+@pytest.mark.asyncio
+async def test_europepmc_adapter_passes_free_text_through_for_synonym_expansion() -> None:
+    """Europe PMC FREE queries should be natural language so the repository's
+    ``synonym=true`` parameter can expand MeSH/UMLS/ChEMBL synonyms."""
+    adapter = EuropePMCAdapter()
+
+    translated = await adapter.translate(
+        query="GLP-1 antagonists effect on hypercholesterolemia",
+        query_type=QueryType.FREE,
+    )
+
+    assert translated
+    assert "[tiab]" not in translated
+    assert "[MeSH]" not in translated
+    assert "GLP-1" in translated
+    assert "hypercholesterolemia" in translated.lower()
+
+
+@pytest.mark.asyncio
+async def test_openalex_adapter_passes_free_text_through_for_search_param() -> None:
+    """OpenAlex FREE queries should be a natural-language string for the
+    ``search`` parameter's BM25 + citation scoring; not a forced AND chain."""
+    adapter = OpenAlexAdapter()
+
+    translated = await adapter.translate(
+        query="Impact of GLP-1 antagonists on high cholesterol",
+        query_type=QueryType.FREE,
+    )
+
+    assert translated
+    assert " AND " not in translated
+    assert "GLP-1" in translated
+    assert "cholesterol" in translated.lower()
+
+
+@pytest.mark.asyncio
+async def test_openalex_adapter_strips_pubmed_field_tags_in_free_mode() -> None:
+    """If a user pastes PubMed-syntax into a FREE query, OpenAlex receives
+    the cleaned text without bracketed tags."""
+    adapter = OpenAlexAdapter()
+
+    translated = await adapter.translate(
+        query="metformin[tiab] cardiovascular[MeSH] risk",
+        query_type=QueryType.FREE,
+    )
+
+    assert "[tiab]" not in translated
+    assert "[MeSH]" not in translated
+    assert "metformin" in translated.lower()
+    assert "cardiovascular" in translated.lower()
+    assert "risk" in translated.lower()
+
+
+@pytest.mark.asyncio
+async def test_clinicaltrials_adapter_keeps_biomedical_terms_after_stop_word_trim() -> None:
+    """The trimmed _STOP_WORDS list must keep biomedical-meaningful tokens
+    such as 'trial', 'effect', 'treatment' so CT.gov keyword search recall
+    is not artificially narrowed."""
+    adapter = ClinicalTrialsAdapter()
+
+    translated = await adapter.translate(
+        query="Effect of metformin treatment on cardiovascular trial outcomes",
+        query_type=QueryType.FREE,
+    )
+
+    assert translated
+    lowered = translated.lower()
+    # At least two of the previously-stripped biomedical tokens must survive.
+    survived = sum(1 for term in ("trial", "effect", "treatment") if term in lowered)
+    assert survived >= 2
 
 
 @pytest.mark.asyncio

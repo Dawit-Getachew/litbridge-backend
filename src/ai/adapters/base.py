@@ -16,6 +16,12 @@ class BaseQueryAdapter(ABC):
 
     source: ClassVar[SourceType]
 
+    # Trimmed stop-word list for biomedical free-text queries.
+    # Removed: study, trial, effect(s), result(s), analysis, based, using,
+    # treatment, prevention. These tokens carry real meaning in clinical
+    # literature (e.g. "metformin trial", "hypertension treatment") and
+    # dropping them was narrowing recall significantly.
+    # Kept: only true grammar/structure words that add no retrieval signal.
     _STOP_WORDS: ClassVar[set[str]] = {
         "a",
         "an",
@@ -45,15 +51,6 @@ class BaseQueryAdapter(ABC):
         "which",
         "with",
         "without",
-        "study",
-        "trial",
-        "effect",
-        "effects",
-        "result",
-        "results",
-        "analysis",
-        "based",
-        "using",
     }
 
     @abstractmethod

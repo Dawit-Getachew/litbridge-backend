@@ -99,11 +99,19 @@ class StreamingSearchService:
                 query_type=request.query_type,
                 pico=request.pico,
                 sources=selected_sources,
+                llm_client=self.llm_client,
+                redis_client=self.redis_client,
+                # ``settings`` is optional: when the fetcher is a lightweight
+                # test mock without the attribute we simply fall back to the
+                # deterministic adapter path (the LLM rewriter is also
+                # feature-flag-gated, so missing settings is a no-op).
+                settings=getattr(self.fetcher, "settings", None),
             )
             effective_max_results = FetcherService._max_results_for_mode(
                 request.search_mode,
                 request.max_results,
             )
+            sort_mode = FetcherService._sort_mode_for_query_type(request.query_type)
 
             all_raw_records: list[RawRecord] = []
             source_counts: dict[SourceType, int] = {s: 0 for s in selected_sources}
@@ -128,6 +136,7 @@ class StreamingSearchService:
                         source=source,
                         translated_query=translated_queries.get(source, request.query),
                         max_results=effective_max_results,
+                        sort_mode=sort_mode,
                     )
                 )
                 for source in selected_sources
@@ -170,7 +179,11 @@ class StreamingSearchService:
                 data={"message": f"Removing duplicates from {total_before} total articles..."},
             )
 
-            unified_records = self.dedup.deduplicate(all_raw_records)
+            unified_records = self.dedup.deduplicate(
+                all_raw_records,
+                query=request.query,
+                query_type=request.query_type,
+            )
             total_after = len(unified_records)
             duplicates_removed = total_before - total_after
 
@@ -246,12 +259,17 @@ class StreamingSearchService:
         source: SourceType,
         translated_query: str,
         max_results: int,
+        sort_mode: str = "relevance",
     ) -> tuple[SourceType, list[RawRecord], int, str | None]:
         """Fetch one source and return normalized completion metadata."""
         repository = get_repository(source=source, client=self.fetcher.client)
         started_at = time.perf_counter()
         try:
-            records = await repository.search(query=translated_query, max_results=max_results)
+            records = await repository.search(
+                query=translated_query,
+                max_results=max_results,
+                sort_mode=sort_mode,  # type: ignore[arg-type]
+            )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             self.logger.warning(

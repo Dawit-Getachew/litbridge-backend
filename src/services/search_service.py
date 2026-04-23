@@ -82,7 +82,11 @@ class SearchService:
                 max_results=request.max_results,
             )
 
-            unified_records = self.dedup.deduplicate(raw_records)
+            unified_records = self.dedup.deduplicate(
+                raw_records,
+                query=request.query,
+                query_type=request.query_type,
+            )
             await self.search_repo.store_results(str(session.id), unified_records)
 
             session.status = "completed"

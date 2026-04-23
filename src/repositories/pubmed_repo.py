@@ -6,7 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from src.core.exceptions import SourceFetchError
-from src.repositories.base_repo import BaseSourceRepository
+from src.repositories.base_repo import BaseSourceRepository, SortMode
 from src.schemas.enums import SourceType
 from src.schemas.records import RawRecord
 
@@ -19,24 +19,41 @@ class PubMedRepository(BaseSourceRepository):
     _BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     _BATCH_SIZE = 250
 
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
-        """Search PubMed via esearch then fetch article details with efetch."""
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: SortMode = "relevance",
+    ) -> list[RawRecord]:
+        """Search PubMed via esearch then fetch article details with efetch.
+
+        With ``sort_mode="relevance"`` we ask PubMed for its Best Match ranking
+        (BM25 + LambdaMART), which mirrors the order pubmed.ncbi.nlm.nih.gov
+        shows by default. With ``sort_mode="date"`` we omit the sort parameter
+        so PubMed falls back to its default ``most_recent`` order — used for
+        BOOLEAN/PRISMA-style queries where reviewers need a stable chronological
+        list.
+        """
         if not query.strip() or max_results <= 0:
             return []
+
+        esearch_params: dict[str, str | int] = {
+            "db": "pubmed",
+            "term": query,
+            "retmax": max_results,
+            "usehistory": "y",
+            "retmode": "xml",
+            "api_key": self.settings.NCBI_API_KEY,
+            "email": self.settings.CONTACT_EMAIL,
+        }
+        if sort_mode == "relevance":
+            esearch_params["sort"] = "relevance"
 
         try:
             esearch_response = await self._request(
                 method="GET",
                 url=f"{self._BASE_URL}/esearch.fcgi",
-                params={
-                    "db": "pubmed",
-                    "term": query,
-                    "retmax": max_results,
-                    "usehistory": "y",
-                    "retmode": "xml",
-                    "api_key": self.settings.NCBI_API_KEY,
-                    "email": self.settings.CONTACT_EMAIL,
-                },
+                params=esearch_params,
             )
             pmids, count, webenv, query_key = self._parse_esearch(esearch_response.text)
         except SourceFetchError:
@@ -72,7 +89,7 @@ class PubMedRepository(BaseSourceRepository):
                     break
                 if len(records) >= target_count:
                     break
-            return records[:target_count]
+            return self._assign_source_ranks(records[:target_count])
 
         # Fallback path when usehistory is unavailable.
         selected_pmids = pmids[:target_count]
@@ -94,7 +111,7 @@ class PubMedRepository(BaseSourceRepository):
             except SourceFetchError:
                 break
 
-        return records[:target_count]
+        return self._assign_source_ranks(records[:target_count])
 
     async def fetch_by_id(self, source_id: str) -> RawRecord | None:
         """Fetch a single PubMed article by PMID."""

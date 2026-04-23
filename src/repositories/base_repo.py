@@ -8,7 +8,7 @@ import random
 import time
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import structlog
@@ -17,6 +17,8 @@ from src.core.config import Settings, get_settings
 from src.core.exceptions import SourceFetchError
 from src.schemas.records import RawRecord
 from src.schemas.enums import SourceType
+
+SortMode = Literal["relevance", "date"]
 
 
 class BaseSourceRepository(abc.ABC):
@@ -35,12 +37,38 @@ class BaseSourceRepository(abc.ABC):
         self._last_request_at = 0.0
 
     @abc.abstractmethod
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
-        """Search this source and return normalized records."""
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: SortMode = "relevance",
+    ) -> list[RawRecord]:
+        """Search this source and return normalized records.
+
+        Args:
+            query: Source-specific query string (already translated by the adapter).
+            max_results: Upper bound on records to fetch from this source.
+            sort_mode: Hint for source-side ordering. "relevance" is the default
+                because cross-source ranking (RRF) downstream relies on each
+                source returning its strongest hits first. "date" is used for
+                BOOLEAN searches (PRISMA-style protocols) where the auditor needs
+                the canonical, source-default chronological ordering.
+        """
 
     @abc.abstractmethod
     async def fetch_by_id(self, source_id: str) -> RawRecord | None:
         """Fetch one record by source-specific identifier."""
+
+    @staticmethod
+    def _assign_source_ranks(records: list[RawRecord]) -> list[RawRecord]:
+        """Set 1-based source_rank on each record in returned order (in-place).
+
+        Records returned earlier are considered more relevant by the source.
+        Internal-only signal consumed by DedupService for Reciprocal Rank Fusion.
+        """
+        for index, record in enumerate(records, start=1):
+            record.source_rank = index
+        return records
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Perform resilient HTTP requests with retry and rate-limit handling."""

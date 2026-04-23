@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from src.core.exceptions import SourceFetchError
-from src.repositories.base_repo import BaseSourceRepository
+from src.repositories.base_repo import BaseSourceRepository, SortMode
 from src.schemas.enums import OAStatus, SourceType
 from src.schemas.records import RawRecord
 
@@ -22,26 +22,44 @@ class EuropePMCRepository(BaseSourceRepository):
     _FULLTEXT_URL_TEMPLATE = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmid}/fullTextXML"
     _PAGE_SIZE = 100
 
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
-        """Search Europe PMC via cursor-based pagination."""
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: SortMode = "relevance",
+    ) -> list[RawRecord]:
+        """Search Europe PMC via cursor-based pagination.
+
+        ``synonym=true`` enables Europe PMC's MeSH/UMLS synonym expansion which
+        materially boosts recall on free-text biomedical queries (matches the
+        behavior of europepmc.org's web UI). For BOOLEAN/PRISMA mode we keep
+        synonym expansion off and request explicit chronological order so the
+        result set is reproducible for a systematic review.
+        """
         if not query.strip() or max_results <= 0:
             return []
 
         cursor = "*"
         records: list[RawRecord] = []
 
+        base_params: dict[str, Any] = {
+            "query": query,
+            "format": "json",
+            "resultType": "core",
+            "pageSize": min(self._PAGE_SIZE, max_results),
+        }
+        if sort_mode == "relevance":
+            base_params["synonym"] = "true"
+            # Europe PMC defaults to relevance sort when no sort param is given.
+        else:
+            base_params["sort"] = "P_PDATE_D desc"
+
         while cursor and len(records) < max_results:
             try:
                 response = await self._request(
                     method="GET",
                     url=self._SEARCH_URL,
-                    params={
-                        "query": query,
-                        "format": "json",
-                        "resultType": "core",
-                        "pageSize": min(self._PAGE_SIZE, max_results),
-                        "cursorMark": cursor,
-                    },
+                    params={**base_params, "cursorMark": cursor},
                 )
             except SourceFetchError as exc:
                 if records:
@@ -69,7 +87,7 @@ class EuropePMCRepository(BaseSourceRepository):
                 break
             cursor = next_cursor
 
-        return records[:max_results]
+        return self._assign_source_ranks(records[:max_results])
 
     async def fetch_by_id(self, source_id: str) -> RawRecord | None:
         """Fetch a single Europe PMC record by external id."""

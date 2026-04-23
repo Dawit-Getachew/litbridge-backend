@@ -20,7 +20,15 @@ class OpenAlexAdapter(BaseQueryAdapter):
         query_type: QueryType,
         pico: PICOInput | None = None,
     ) -> str:
-        """Convert query into OpenAlex-compatible syntax."""
+        """Convert query into OpenAlex-compatible syntax.
+
+        For ``QueryType.FREE`` we pass a sanitized natural-language string
+        directly to OpenAlex. The ``search`` API parameter (set at the
+        repository layer) performs BM25-style scoring across title and
+        abstract with stop-word handling — wrapping every keyword in a
+        forced ``AND`` chain (the previous behavior) artificially narrowed
+        the result set and discarded the citation ranking signal.
+        """
         if query_type is QueryType.PICO:
             terms = self._terms_from_pico(pico)
             return self._join_terms(terms)
@@ -32,7 +40,21 @@ class OpenAlexAdapter(BaseQueryAdapter):
         if query_type is QueryType.BOOLEAN:
             return self._normalize_boolean(query)
 
-        return self._join_terms(self._extract_keywords(query, max_terms=6))
+        return self._sanitize_natural(query)
+
+    @staticmethod
+    def _sanitize_natural(query: str) -> str:
+        """Return a clean natural-language query for OpenAlex's search param.
+
+        Strips PubMed-style field tags (``[tiab]``, ``[MeSH]``) and bare
+        brackets if a user accidentally pastes them, then collapses
+        whitespace. Hyphens, apostrophes, and parentheses are preserved so
+        compound entities (``GLP-1``, ``Crohn's``) survive intact.
+        """
+        cleaned = re.sub(r"\[[\w: ]+\]", " ", query)
+        cleaned = re.sub(r"[\[\]]", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     def _normalize_boolean(self, query: str) -> str:
         """Remove unsupported PubMed tags and normalize operators."""

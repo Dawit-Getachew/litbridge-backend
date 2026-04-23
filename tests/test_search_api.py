@@ -150,7 +150,12 @@ class MockDedupService:
     def __init__(self, record_count: int = 25) -> None:
         self.record_count = record_count
 
-    def deduplicate(self, _records: list[RawRecord]) -> list[UnifiedRecord]:
+    def deduplicate(
+        self,
+        _records: list[RawRecord],
+        query: str | None = None,  # noqa: ARG002
+        query_type: object = None,  # noqa: ARG002
+    ) -> list[UnifiedRecord]:
         sources = list(SourceType)
         return [
             UnifiedRecord(

@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from src.core.exceptions import SourceFetchError
-from src.repositories.base_repo import BaseSourceRepository
+from src.repositories.base_repo import BaseSourceRepository, SortMode
 from src.schemas.enums import OAStatus, SourceType
 from src.schemas.records import RawRecord
 
@@ -19,13 +19,28 @@ class OpenAlexRepository(BaseSourceRepository):
     _BASE_URL = "https://api.openalex.org/works"
     _PAGE_SIZE = 50
 
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
-        """Search OpenAlex works using cursor pagination."""
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: SortMode = "relevance",
+    ) -> list[RawRecord]:
+        """Search OpenAlex works using cursor pagination.
+
+        OpenAlex's ``search`` parameter performs full-text relevance scoring
+        and, when no ``sort`` is supplied, returns results in a stable but
+        loosely-relevance-ordered fashion. We pass ``sort=relevance_score:desc``
+        explicitly to make the contract deterministic for downstream RRF, and
+        switch to ``publication_date:desc`` for BOOLEAN/PRISMA queries.
+        """
         if not query.strip() or max_results <= 0:
             return []
 
         cursor = "*"
         records: list[RawRecord] = []
+        sort_param = (
+            "relevance_score:desc" if sort_mode == "relevance" else "publication_date:desc"
+        )
 
         while cursor and len(records) < max_results:
             try:
@@ -35,6 +50,7 @@ class OpenAlexRepository(BaseSourceRepository):
                     params={
                         "search": query,
                         "filter": "is_paratext:false",
+                        "sort": sort_param,
                         "mailto": self.settings.CONTACT_EMAIL,
                         "per_page": self._PAGE_SIZE,
                         "cursor": cursor,
@@ -54,7 +70,7 @@ class OpenAlexRepository(BaseSourceRepository):
 
             cursor = payload.get("meta", {}).get("next_cursor")
 
-        return records[:max_results]
+        return self._assign_source_ranks(records[:max_results])
 
     async def fetch_by_id(self, source_id: str) -> RawRecord | None:
         """Fetch one OpenAlex work by identifier."""

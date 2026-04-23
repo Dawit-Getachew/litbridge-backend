@@ -85,7 +85,12 @@ class MockFetcherService:
 class MockDedupService:
     """Dedup mock that keeps one output record per raw input record."""
 
-    def deduplicate(self, records: list[RawRecord]) -> list[UnifiedRecord]:
+    def deduplicate(
+        self,
+        records: list[RawRecord],
+        query: str | None = None,  # noqa: ARG002
+        query_type: object = None,  # noqa: ARG002
+    ) -> list[UnifiedRecord]:
         return [
             UnifiedRecord(
                 id=f"rec-{index}",
@@ -113,7 +118,12 @@ class FakeSourceRepository:
         self.source_counts = source_counts
         self.failing_sources = failing_sources
 
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: str = "relevance",  # noqa: ARG002
+    ) -> list[RawRecord]:
         await asyncio.sleep(0.001)
         if self.source in self.failing_sources:
             raise TimeoutError("timeout")
@@ -181,7 +191,7 @@ def streaming_api_context(async_client: AsyncClient, monkeypatch: pytest.MonkeyP
     }
     failing_sources: set[SourceType] = set()
 
-    async def fake_translate_for_all_sources(*, query, query_type, pico=None, sources=None):
+    async def fake_translate_for_all_sources(*, query, query_type, pico=None, sources=None, **_kwargs):
         selected_sources = sources or list(SourceType)
         return {source: query for source in selected_sources}
 

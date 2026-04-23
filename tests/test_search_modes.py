@@ -118,7 +118,12 @@ class RecordingFetcherService:
 class PassthroughDedupService:
     """Simple dedup mock returning one unified record per raw record."""
 
-    def deduplicate(self, records: list[RawRecord]) -> list[UnifiedRecord]:
+    def deduplicate(
+        self,
+        records: list[RawRecord],
+        query: str | None = None,  # noqa: ARG002
+        query_type: object = None,  # noqa: ARG002
+    ) -> list[UnifiedRecord]:
         return [
             UnifiedRecord(
                 id=f"rec-{index}",
@@ -188,7 +193,12 @@ class FakeSourceRepository:
         self.source = source
         self.max_results_log = max_results_log
 
-    async def search(self, query: str, max_results: int = 100) -> list[RawRecord]:
+    async def search(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort_mode: str = "relevance",  # noqa: ARG002
+    ) -> list[RawRecord]:
         self.max_results_log.append((self.source, max_results))
         count = min(2, max_results)
         return [
@@ -309,7 +319,7 @@ async def test_deep_thinking_stream_emits_enrichment_and_thinking_events(
 
     max_results_log: list[tuple[SourceType, int]] = []
 
-    async def fake_translate_for_all_sources(*, query, query_type, pico=None, sources=None):
+    async def fake_translate_for_all_sources(*, query, query_type, pico=None, sources=None, **_kwargs):
         selected_sources = sources or list(SourceType)
         return {source: f"{query} ({source.value})" for source in selected_sources}
 
@@ -353,7 +363,7 @@ async def test_light_thinking_stream_emits_quick_summary_only(
 
     max_results_log: list[tuple[SourceType, int]] = []
 
-    async def fake_translate_for_all_sources(*, query, query_type, pico=None, sources=None):
+    async def fake_translate_for_all_sources(*, query, query_type, pico=None, sources=None, **_kwargs):
         selected_sources = sources or list(SourceType)
         return {source: query for source in selected_sources}
 

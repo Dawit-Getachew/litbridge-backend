@@ -47,4 +47,5 @@ logs/
 docker-compose.override.yml
 
 # Cursor plans
-.cursor/plans/
+.cursor/plans/  
+docs/

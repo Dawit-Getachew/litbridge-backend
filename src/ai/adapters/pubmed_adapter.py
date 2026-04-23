@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from src.ai.adapters.base import BaseQueryAdapter
 from src.schemas.enums import QueryType, SourceType
 from src.schemas.pico import PICOInput
@@ -18,7 +20,17 @@ class PubMedAdapter(BaseQueryAdapter):
         query_type: QueryType,
         pico: PICOInput | None = None,
     ) -> str:
-        """Translate user input to PubMed Boolean expression."""
+        """Translate user input to PubMed Boolean expression.
+
+        For ``QueryType.FREE`` we deliberately pass a lightly-sanitized
+        natural-language string so PubMed's Automatic Term Mapping (ATM) is
+        not bypassed. ATM expands MeSH/synonyms/spelling/plurals — adding
+        ``[tiab]``/``[MeSH]`` field tags would *disable* ATM token-by-token
+        and narrow recall by 4-10x on biomedical queries.
+
+        BOOLEAN, PICO, and ABSTRACT modes keep their structured behavior so
+        PRISMA/PICO contracts are unchanged.
+        """
         if query_type is QueryType.BOOLEAN:
             return query.strip()
 
@@ -28,7 +40,20 @@ class PubMedAdapter(BaseQueryAdapter):
         if query_type is QueryType.ABSTRACT:
             return self._terms_to_pubmed_boolean(self._extract_keywords(query, max_terms=8))
 
-        return self._terms_to_pubmed_boolean(self._extract_keywords(query, max_terms=6))
+        return self._sanitize_natural(query)
+
+    @staticmethod
+    def _sanitize_natural(query: str) -> str:
+        """Return a clean natural-language query safe to feed to PubMed ATM.
+
+        We strip bare ``[`` and ``]`` so user-supplied brackets cannot be
+        interpreted as field tags (which would silently disable ATM). All
+        other characters — including hyphens (``GLP-1``), apostrophes
+        (``Crohn's``) and parentheses — are preserved.
+        """
+        cleaned = re.sub(r"[\[\]]", " ", query)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     def _translate_pico(self, pico: PICOInput | None, fallback: str) -> str:
         """Build a PICO-constrained PubMed Boolean string."""

@@ -112,7 +112,12 @@ class RecordingFetcher:
 class PassthroughDedup:
     """Simple dedup mock returning one record per source."""
 
-    def deduplicate(self, records: list[RawRecord]) -> list[UnifiedRecord]:
+    def deduplicate(
+        self,
+        records: list[RawRecord],
+        query: str | None = None,  # noqa: ARG002
+        query_type: object = None,  # noqa: ARG002
+    ) -> list[UnifiedRecord]:
         return [
             UnifiedRecord(
                 id=f"rec-{idx}",
