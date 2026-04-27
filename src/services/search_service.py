@@ -86,6 +86,7 @@ class SearchService:
                 raw_records,
                 query=request.query,
                 query_type=request.query_type,
+                search_mode=request.search_mode,
             )
             await self.search_repo.store_results(str(session.id), unified_records)
 

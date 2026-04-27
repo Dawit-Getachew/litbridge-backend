@@ -106,6 +106,7 @@ class StreamingSearchService:
                 # deterministic adapter path (the LLM rewriter is also
                 # feature-flag-gated, so missing settings is a no-op).
                 settings=getattr(self.fetcher, "settings", None),
+                search_mode=request.search_mode,
             )
             effective_max_results = FetcherService._max_results_for_mode(
                 request.search_mode,
@@ -183,6 +184,7 @@ class StreamingSearchService:
                 all_raw_records,
                 query=request.query,
                 query_type=request.query_type,
+                search_mode=request.search_mode,
             )
             total_after = len(unified_records)
             duplicates_removed = total_before - total_after

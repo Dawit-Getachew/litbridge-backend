@@ -16,12 +16,26 @@ dependencies = [
     "pydantic-settings",
     "structlog",
     "rapidfuzz",
+    "bm25s>=0.2.0",
     "langgraph",
     "langchain-core",
     "langchain-openai",
     "python-dotenv",
     "pyjwt[crypto]",
     "email-validator",
+]
+
+[project.optional-dependencies]
+medcpt-onnx = [
+    "onnxruntime>=1.18",
+    "transformers>=4.40",
+    "tokenizers>=0.19",
+    "numpy",
+]
+medcpt-torch = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "sentencepiece",
 ]
 
 [dependency-groups]

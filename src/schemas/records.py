@@ -60,3 +60,13 @@ class RawRecord(BaseModel):
     # sorted result list. 0 means "unranked" (e.g. legacy cached records). Not
     # exposed in UnifiedRecord / API responses.
     source_rank: int = 0
+    # Internal-only ranking signal: citation count as reported by the source
+    # (OpenAlex ``cited_by_count`` and Europe PMC ``citedByCount``). Feeds the
+    # Phase A citation-count boost in DedupService. UnifiedRecord.citation_count
+    # already exists publicly and is filled downstream by the enrichment
+    # service — this raw field is strictly internal to the ranking pipeline.
+    citation_count: int | None = None
+    # Internal-only ranking signal: local BM25 score attached by the Phase B
+    # reranker over title + abstract. Blended with the fused RRF score. Not
+    # exposed in UnifiedRecord / API responses.
+    bm25_score: float | None = None

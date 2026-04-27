@@ -1,13 +1,17 @@
-"""Tests for the optional Phase 3 LLM query rewriter.
+"""Tests for the LLM query rewriter (Phase 3 + v3 Query2doc expansion).
 
-The rewriter is behind a server-side env flag and must be:
+In v3 the rewriter is:
 
-* An exact no-op when the flag is OFF (default).
-* A no-op when ``query_type`` is not ``QueryType.FREE``.
+* Default ON (``RANKING_LLM_REWRITE=True``).
+* Runtime-gated: invoked only for ``QueryType.FREE`` +
+  ``SearchMode.QUICK``. Other combinations skip the LLM entirely.
+* An exact no-op when explicitly disabled via the env flag.
 * Strictly non-regressing on failure — adapter output must win whenever
   the LLM times out, errors, or returns malformed JSON.
 * Cached in Redis for ``RANKING_LLM_REWRITE_TTL_SECONDS`` so repeat
   traffic does not re-invoke the model.
+* Extended with a Query2doc pseudo-abstract expansion when
+  ``RANKING_QUERY2DOC_ENABLED`` is True.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import pytest
 from src.ai.adapters import translate_for_all_sources
 from src.ai.query_rewriter import rewrite_for_sources
 from src.core.config import get_settings
-from src.schemas.enums import QueryType, SourceType
+from src.schemas.enums import QueryType, SearchMode, SourceType
 
 
 class _FakeResponse:
@@ -100,17 +104,17 @@ class _InMemoryRedis:
 
 
 @pytest.mark.asyncio
-async def test_rewriter_disabled_by_default_is_pure_noop() -> None:
-    """Default settings (RANKING_LLM_REWRITE=False) must not call the LLM
-    at all; the output must come entirely from deterministic adapters."""
+async def test_rewriter_can_be_fully_disabled_via_env_flag() -> None:
+    """Explicit ``RANKING_LLM_REWRITE=False`` must skip the LLM entirely —
+    the env flag stays a hard kill-switch regardless of the v3 defaults."""
     llm = _FakeLLMClient(reply="""{"pubmed": "SHOULD-NOT-APPEAR"}""")
     redis_client = _InMemoryRedis()
-    settings = get_settings()
-    assert settings.RANKING_LLM_REWRITE is False  # sanity
+    settings = get_settings().model_copy(update={"RANKING_LLM_REWRITE": False})
 
     translated = await translate_for_all_sources(
         query="impact of GLP-1 antagonists on high cholesterol",
         query_type=QueryType.FREE,
+        search_mode=SearchMode.QUICK,
         sources=[SourceType.PUBMED, SourceType.OPENALEX],
         llm_client=llm,  # type: ignore[arg-type]
         redis_client=redis_client,  # type: ignore[arg-type]
@@ -120,6 +124,62 @@ async def test_rewriter_disabled_by_default_is_pure_noop() -> None:
     assert llm.client.calls == 0
     assert "SHOULD-NOT-APPEAR" not in translated[SourceType.PUBMED]
     assert "SHOULD-NOT-APPEAR" not in translated[SourceType.OPENALEX]
+
+
+@pytest.mark.asyncio
+async def test_rewriter_default_on_for_free_quick_mode() -> None:
+    """With no env override, FREE + QUICK must invoke the rewriter — this
+    is the v3 default and the exact case the client flagged (quick mode
+    free-text search)."""
+    reply = json.dumps(
+        {
+            "pubmed": "glp-1[tiab] AND cholesterol[tiab]",
+            "openalex": "glp-1 cholesterol",
+        },
+    )
+    llm = _FakeLLMClient(reply=reply)
+    redis_client = _InMemoryRedis()
+    settings = get_settings()  # default: RANKING_LLM_REWRITE=True
+
+    translated = await translate_for_all_sources(
+        query="GLP-1 antagonists and cholesterol",
+        query_type=QueryType.FREE,
+        search_mode=SearchMode.QUICK,
+        sources=[SourceType.PUBMED, SourceType.OPENALEX],
+        llm_client=llm,  # type: ignore[arg-type]
+        redis_client=redis_client,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert llm.client.calls == 1
+    assert translated[SourceType.OPENALEX] == "glp-1 cholesterol"
+
+
+@pytest.mark.asyncio
+async def test_rewriter_skipped_for_deep_modes() -> None:
+    """Deep modes have their own query synthesis; the rewriter must not
+    invoke the LLM for them regardless of the flag default."""
+    llm = _FakeLLMClient(reply="""{"pubmed": "never-used"}""")
+    redis_client = _InMemoryRedis()
+    settings = get_settings()  # default: flag True
+
+    for mode in (
+        SearchMode.DEEP_RESEARCH,
+        SearchMode.DEEP_ANALYZE,
+        SearchMode.DEEP_THINKING,
+        SearchMode.LIGHT_THINKING,
+    ):
+        await translate_for_all_sources(
+            query="metformin cardiovascular outcomes",
+            query_type=QueryType.FREE,
+            search_mode=mode,
+            sources=[SourceType.PUBMED],
+            llm_client=llm,  # type: ignore[arg-type]
+            redis_client=redis_client,  # type: ignore[arg-type]
+            settings=settings,
+        )
+
+    assert llm.client.calls == 0
 
 
 @pytest.mark.asyncio
@@ -267,3 +327,94 @@ async def test_rewriter_falls_back_on_timeout() -> None:
 
     # Adapter fallback wins because the rewriter timed out.
     assert "never-used" not in translated[SourceType.PUBMED]
+
+
+# -----------------------------------------------------------------------------
+# Query2doc expansion (v3 Phase C)
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_query2doc_appends_pseudo_doc_terms_when_enabled() -> None:
+    """With Query2doc on, expansion terms from the pseudo-abstract must be
+    appended to the per-source rewrite in the source's native syntax:
+
+    * PubMed: ``(base) AND (term[tiab] OR ...)``
+    * Europe PMC: ``(base) AND (term OR ...)``
+    * OpenAlex / CT.gov: space-separated free-text.
+    """
+    reply = json.dumps(
+        {
+            "pubmed": "glp-1 antagonists cholesterol",
+            "europepmc": "glp-1 antagonists cholesterol",
+            "openalex": "glp-1 antagonists cholesterol",
+            "clinicaltrials": "glp-1 cholesterol",
+            "pseudo_doc": (
+                "This trial evaluated glucagon-like-peptide-1 antagonists for "
+                "patients with hyperlipidemia and elevated ldl cholesterol. "
+                "Researchers measured cardiovascular outcomes and metabolic biomarkers."
+            ),
+        },
+    )
+    llm = _FakeLLMClient(reply=reply)
+    redis_client = _InMemoryRedis()
+    settings = get_settings().model_copy(
+        update={
+            "RANKING_LLM_REWRITE": True,
+            "RANKING_QUERY2DOC_ENABLED": True,
+        },
+    )
+
+    rewrites = await rewrite_for_sources(
+        query="GLP-1 antagonists cholesterol",
+        sources=[
+            SourceType.PUBMED,
+            SourceType.EUROPEPMC,
+            SourceType.OPENALEX,
+            SourceType.CLINICALTRIALS,
+        ],
+        llm_client=llm,  # type: ignore[arg-type]
+        redis_client=redis_client,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    pubmed_rewrite = rewrites[SourceType.PUBMED]
+    assert pubmed_rewrite.startswith("(glp-1 antagonists cholesterol) AND (")
+    assert "[tiab]" in pubmed_rewrite  # field-tag syntax preserved
+
+    epmc_rewrite = rewrites[SourceType.EUROPEPMC]
+    assert epmc_rewrite.startswith("(glp-1 antagonists cholesterol) AND (")
+    assert "[tiab]" not in epmc_rewrite
+
+    openalex_rewrite = rewrites[SourceType.OPENALEX]
+    assert openalex_rewrite.startswith("glp-1 antagonists cholesterol ")
+
+
+@pytest.mark.asyncio
+async def test_query2doc_disabled_leaves_rewrites_untouched() -> None:
+    """With the flag off, even a valid ``pseudo_doc`` in the LLM reply must
+    not mutate the per-source rewrites."""
+    reply = json.dumps(
+        {
+            "pubmed": "original pubmed rewrite",
+            "pseudo_doc": "irrelevant pseudo abstract with many terms",
+        },
+    )
+    llm = _FakeLLMClient(reply=reply)
+    redis_client = _InMemoryRedis()
+    settings = get_settings().model_copy(
+        update={
+            "RANKING_LLM_REWRITE": True,
+            "RANKING_QUERY2DOC_ENABLED": False,
+        },
+    )
+
+    rewrites = await rewrite_for_sources(
+        query="x",
+        sources=[SourceType.PUBMED],
+        llm_client=llm,  # type: ignore[arg-type]
+        redis_client=redis_client,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert rewrites[SourceType.PUBMED] == "original pubmed rewrite"

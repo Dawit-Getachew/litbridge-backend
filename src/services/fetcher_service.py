@@ -83,6 +83,7 @@ class FetcherService:
             llm_client=self.llm_client,
             redis_client=self.redis_client,
             settings=self.settings,
+            search_mode=search_mode,
         )
 
         sort_mode = self._sort_mode_for_query_type(query_type)

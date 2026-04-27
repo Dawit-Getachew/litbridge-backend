@@ -629,8 +629,15 @@ def test_rrf_disabled_via_zero_boost_settings_still_sorts_by_rrf() -> None:
 
 def test_mmr_disabled_by_default_preserves_rrf_order() -> None:
     """With the default settings (lambda=1.0) MMR must be a no-op so
-    the existing Phase 2 ordering is byte-identical to before."""
-    service = DedupService()
+    the existing Phase 2 ordering is byte-identical to before.
+
+    BM25 is explicitly disabled here so the test isolates MMR's (lack of)
+    reordering from BM25's blended-score effect — both features are
+    independent and each has its own dedicated test."""
+    from src.core.config import get_settings
+
+    settings = get_settings().model_copy(update={"RANKING_BM25_WEIGHT": 0.0})
+    service = DedupService(settings=settings)
     records = [
         _build_raw_record(
             source_id="a",

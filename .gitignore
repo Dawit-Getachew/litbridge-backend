@@ -49,3 +49,9 @@ docker-compose.override.yml
 # Cursor plans
 .cursor/plans/  
 docs/
+
+# Model weights (MedCPT ONNX export). Keep the directory via .gitkeep but
+# ignore the large binary artifacts themselves — they're produced by
+# scripts/export_medcpt_onnx.py and deployed via Coolify volume or image.
+models/*
+!models/.gitkeep

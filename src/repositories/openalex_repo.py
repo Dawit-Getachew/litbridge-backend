@@ -125,6 +125,7 @@ class OpenAlexRepository(BaseSourceRepository):
             abstract=self._reconstruct_abstract(work.get("abstract_inverted_index")),
             pdf_url=oa_url,
             oa_status=OAStatus.OPEN if is_oa else OAStatus.CLOSED,
+            citation_count=self._as_int(work.get("cited_by_count")),
             raw_data=work,
         )
 

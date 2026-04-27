@@ -152,8 +152,22 @@ class EuropePMCRepository(BaseSourceRepository):
             pmid=self._clean_str(entry.get("pmid")),
             abstract=self._clean_str(entry.get("abstractText")),
             oa_status=self._parse_oa_status(entry.get("isOpenAccess")),
+            citation_count=self._parse_citation_count(entry.get("citedByCount")),
             raw_data=entry,
         )
+
+    @staticmethod
+    def _parse_citation_count(value: Any) -> int | None:
+        """Parse Europe PMC ``citedByCount`` (int or digit-string) to int."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.isdigit():
+                return int(stripped)
+        return None
 
     def _split_authors(self, author_string: Any) -> list[str]:
         if not isinstance(author_string, str):

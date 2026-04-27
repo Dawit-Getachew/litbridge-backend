@@ -1,0 +1,3 @@
+# Placeholder so Docker COPY models/ models/ succeeds even on builds
+# that do not bundle MedCPT weights. Run scripts/export_medcpt_onnx.py
+# to populate this directory when RANKING_MEDCPT=True.

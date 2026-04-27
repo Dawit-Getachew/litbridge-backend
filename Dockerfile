@@ -5,15 +5,35 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
+# Opt-in flag (default OFF). Set to "1" at build time to install the ONNX
+# runtime + tokenizers needed by the MedCPT cross-encoder reranker:
+#     docker build --build-arg INSTALL_MEDCPT=1 ...
+# Keeps the base image lean for teams that do not use RANKING_MEDCPT.
+ARG INSTALL_MEDCPT=0
+
 # Install dependencies first (layer cache)
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+RUN if [ "$INSTALL_MEDCPT" = "1" ]; then \
+        uv sync --frozen --no-dev --no-install-project --extra medcpt-onnx; \
+    fi
 
 # Copy source and install the project itself
 COPY src/ src/
 COPY alembic/ alembic/
 COPY alembic.ini ./
+COPY scripts/ scripts/
 RUN uv sync --frozen --no-dev
+RUN if [ "$INSTALL_MEDCPT" = "1" ]; then \
+        uv sync --frozen --no-dev --extra medcpt-onnx; \
+    fi
+
+# Pre-exported quantized weights are expected under ./models/medcpt-cross-onnx-qint8
+# (produced offline via scripts/export_medcpt_onnx.py). The COPY below is a
+# no-op when the directory is absent so builds without MedCPT still succeed.
+# Keeping the weights outside the image (mounted via Coolify volume) is also
+# supported — see docs for the ``RANKING_MEDCPT_MODEL_PATH`` override.
+COPY models/ models/
 
 
 # ---- Stage 2: Runtime ----
@@ -29,6 +49,8 @@ COPY --from=builder /app/.venv .venv
 COPY --from=builder /app/src src
 COPY --from=builder /app/alembic alembic
 COPY --from=builder /app/alembic.ini .
+COPY --from=builder /app/scripts scripts
+COPY --from=builder /app/models models
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -84,6 +84,7 @@ async def preview_search_query(
         llm_client=llm,
         redis_client=redis_client,
         settings=settings,
+        search_mode=request.search_mode,
     )
     return {"translations": {source.value: query for source, query in translated.items()}}
 

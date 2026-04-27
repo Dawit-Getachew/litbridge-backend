@@ -90,6 +90,7 @@ class MockDedupService:
         records: list[RawRecord],
         query: str | None = None,  # noqa: ARG002
         query_type: object = None,  # noqa: ARG002
+        search_mode: object = None,  # noqa: ARG002
     ) -> list[UnifiedRecord]:
         return [
             UnifiedRecord(

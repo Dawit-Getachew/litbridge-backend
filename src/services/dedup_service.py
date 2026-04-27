@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -12,7 +13,9 @@ from rapidfuzz import fuzz
 
 from src.core.config import Settings, get_settings
 from src.core.exceptions import DeduplicationError
-from src.schemas.enums import AgeGroup, OAStatus, QueryType, SourceType, StudyType
+from src.ranking.bm25_reranker import BM25Reranker
+from src.ranking.medcpt_reranker import MedCPTReranker
+from src.schemas.enums import AgeGroup, OAStatus, QueryType, SearchMode, SourceType, StudyType
 from src.schemas.records import RawRecord, UnifiedRecord
 
 
@@ -95,24 +98,39 @@ class DedupService:
     # Pattern for extracting meaningful ≥3-char tokens from titles/queries.
     _TOKEN_PATTERN: re.Pattern[str] = re.compile(r"[a-z0-9\-]{3,}")
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        bm25_reranker: BM25Reranker | None = None,
+        medcpt_reranker: MedCPTReranker | None = None,
+    ) -> None:
         self.logger = structlog.get_logger(__name__).bind(service="dedup_service")
         self.settings = settings or get_settings()
+        self.bm25_reranker = bm25_reranker or BM25Reranker()
+        # MedCPT is a heavy dependency and is disabled by default. We only
+        # resolve the singleton when the feature flag is on so imports stay
+        # lazy for every deployment that doesn't opt in.
+        self._medcpt_reranker = medcpt_reranker
 
     def deduplicate(
         self,
         records: list[RawRecord],
         query: str | None = None,
         query_type: QueryType | None = None,
+        search_mode: SearchMode | None = None,
     ) -> list[UnifiedRecord]:
         """Deduplicate records into unified golden records.
 
         When ``query`` is provided and ``query_type`` is not BOOLEAN, clusters
         are re-ordered by a weighted Reciprocal Rank Fusion score combined
-        with title-match and recency boosts (configurable via ``RANKING_*``
-        settings). BOOLEAN queries keep their source-default (date) order to
-        preserve PRISMA reproducibility. When ``query`` is ``None`` or every
-        record has ``source_rank == 0`` (legacy callers / tests), the existing
+        with title/abstract match, recency, and citation-count boosts
+        (configurable via ``RANKING_*`` settings), then optionally blended
+        with a local BM25 lexical reranker. For FREE + Quick searches we
+        additionally apply PubMed-primary ordering so the client's primary
+        benchmark (PubMed relevance) surfaces verbatim at the top. BOOLEAN
+        queries keep their source-default (date) order to preserve PRISMA
+        reproducibility. When ``query`` is ``None`` or every record has
+        ``source_rank == 0`` (legacy callers / tests), the existing
         first-seen ordering is returned unchanged — so backward compatibility
         is preserved by construction.
         """
@@ -143,12 +161,26 @@ class DedupService:
                 query_type=query_type,
                 clusters=clusters,
             )
+            bm25_applied = False
+            medcpt_applied = False
+            pubmed_primary_applied = False
             if rrf_applied:
                 ordered_clusters = self._rank_clusters_by_rrf(
-                    clusters=clusters, query=query,
+                    clusters=clusters, query=query, query_type=query_type,
                 )
                 ordered_clusters, mmr_applied = self._maybe_mmr_rerank(
-                    clusters=ordered_clusters, query=query,
+                    clusters=ordered_clusters, query=query, query_type=query_type,
+                )
+                ordered_clusters, bm25_applied = self._maybe_bm25_rerank(
+                    clusters=ordered_clusters, query=query, query_type=query_type,
+                )
+                ordered_clusters, medcpt_applied = self._maybe_medcpt_rerank(
+                    clusters=ordered_clusters, query=query, query_type=query_type,
+                )
+                ordered_clusters, pubmed_primary_applied = self._maybe_pubmed_primary(
+                    clusters=ordered_clusters,
+                    query_type=query_type,
+                    search_mode=search_mode,
                 )
             else:
                 ordered_clusters = clusters
@@ -165,7 +197,11 @@ class DedupService:
                 duplicates_removed=len(records) - len(unified),
                 rrf_applied=rrf_applied,
                 mmr_applied=mmr_applied,
+                bm25_applied=bm25_applied,
+                medcpt_applied=medcpt_applied,
+                pubmed_primary_applied=pubmed_primary_applied,
                 query_type=query_type.value if query_type else None,
+                search_mode=search_mode.value if search_mode else None,
                 top5_sources=[
                     self._pick_winner(cluster).source.value
                     for cluster in ordered_clusters[:5]
@@ -211,12 +247,13 @@ class DedupService:
         self,
         clusters: list[list[RawRecord]],
         query: str | None,
+        query_type: QueryType | None = None,
     ) -> list[list[RawRecord]]:
         """Sort clusters by fused RRF score (+boosts) with deterministic ties.
 
         The sort key is, in order of priority:
 
-            1. Descending fused score (RRF × title_boost × recency_boost)
+            1. Descending fused score (RRF × title × abstract × recency × citation)
             2. Descending publication year (newer wins at equal fused score)
             3. Descending distinct-source count (multi-source cluster wins)
             4. Ascending winner source enum value (alphabetical, stable)
@@ -234,6 +271,7 @@ class DedupService:
                 winner=winner,
                 query_terms=query_terms,
                 current_year=current_year,
+                query_type=query_type,
             )
             sort_key = (
                 -fused,
@@ -251,6 +289,7 @@ class DedupService:
         self,
         clusters: list[list[RawRecord]],
         query: str | None,
+        query_type: QueryType | None = None,
     ) -> tuple[list[list[RawRecord]], bool]:
         """Diversify the top-K clusters with Maximal Marginal Relevance.
 
@@ -291,6 +330,7 @@ class DedupService:
                 winner=winner,
                 query_terms=query_terms,
                 current_year=current_year,
+                query_type=query_type,
             )
             for cluster, winner in zip(head, winners, strict=True)
         ]
@@ -322,6 +362,213 @@ class DedupService:
         reordered_head = [head[index] for index in selected]
         return reordered_head + tail, True
 
+    def _maybe_bm25_rerank(
+        self,
+        clusters: list[list[RawRecord]],
+        query: str | None,
+        query_type: QueryType | None = None,
+    ) -> tuple[list[list[RawRecord]], bool]:
+        """Blend a local BM25 score over title+abstract into the ranking.
+
+        Applies only when (a) ``RANKING_BM25_WEIGHT > 0``, (b) we have a
+        non-empty query, and (c) there is more than one cluster to
+        reorder. The BM25 reranker attaches a ``bm25_score`` to each
+        cluster winner (internal-only, not exposed in UnifiedRecord),
+        normalizes it, and blends with the RRF-based fused score.
+
+        Skipped for BOOLEAN so PRISMA reproducibility is preserved (the
+        caller already skipped RRF for that path, but we double-gate here
+        defensively in case this method is ever reached by a new code path).
+        """
+        weight = self.settings.RANKING_BM25_WEIGHT
+        if weight <= 0.0 or not query or not query.strip() or len(clusters) < 2:
+            return clusters, False
+        if query_type is QueryType.BOOLEAN:
+            return clusters, False
+
+        top_k = min(self.settings.RANKING_BM25_TOP_K, len(clusters))
+        head = clusters[:top_k]
+        tail = clusters[top_k:]
+
+        winners: list[RawRecord] = [self._pick_winner(cluster) for cluster in head]
+        try:
+            bm25_scores = self.bm25_reranker.score(query=query, records=winners)
+        except Exception as exc:  # noqa: BLE001
+            # The reranker is a best-effort signal; tokenizer or indexer
+            # hiccups must never break dedup. Log and keep the RRF order.
+            self.logger.warning(
+                "bm25_rerank_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return clusters, False
+
+        current_year = datetime.now(UTC).year
+        query_terms = self._query_terms(query)
+
+        max_bm25 = max(bm25_scores) if bm25_scores else 0.0
+        rrf_scores: list[float] = [
+            self._fused_score(
+                cluster=cluster,
+                winner=winner,
+                query_terms=query_terms,
+                current_year=current_year,
+                query_type=query_type,
+            )
+            for cluster, winner in zip(head, winners, strict=True)
+        ]
+        max_rrf = max(rrf_scores) if rrf_scores else 0.0
+
+        rescored: list[tuple[tuple[float, int, int, str, str], list[RawRecord]]] = []
+        for index, (cluster, winner) in enumerate(zip(head, winners, strict=True)):
+            bm25_norm = bm25_scores[index] / max_bm25 if max_bm25 > 0 else 0.0
+            rrf_norm = rrf_scores[index] / max_rrf if max_rrf > 0 else 0.0
+            # Persist on winner for debugging / downstream observers. This
+            # is attached to RawRecord only — UnifiedRecord does not carry
+            # it, so the public API contract is unchanged.
+            winner.bm25_score = float(bm25_scores[index])
+            blended = weight * bm25_norm + (1.0 - weight) * rrf_norm
+            sort_key = (
+                -blended,
+                -(winner.year or 0),
+                -len({record.source for record in cluster}),
+                winner.source.value,
+                winner.source_id,
+            )
+            rescored.append((sort_key, cluster))
+
+        rescored.sort(key=lambda entry: entry[0])
+        return [cluster for _, cluster in rescored] + tail, True
+
+    def _maybe_medcpt_rerank(
+        self,
+        clusters: list[list[RawRecord]],
+        query: str | None,
+        query_type: QueryType | None = None,
+    ) -> tuple[list[list[RawRecord]], bool]:
+        """Rerank top-K clusters with the MedCPT cross-encoder.
+
+        Strict gates because this is the heaviest signal we have:
+
+        * ``RANKING_MEDCPT`` flag must be on (default ``False``).
+        * Query and at least two clusters available.
+        * Never runs for BOOLEAN (PRISMA keeps date order).
+
+        When the flag is on and the backend is healthy, the top
+        ``RANKING_MEDCPT_TOP_K`` clusters are reordered by the
+        cross-encoder's score; the tail is preserved in the fused/BM25
+        order. Any backend error returns the input unchanged so a
+        misconfigured model never breaks search.
+        """
+        if not self.settings.RANKING_MEDCPT:
+            return clusters, False
+        if not query or not query.strip() or len(clusters) < 2:
+            return clusters, False
+        if query_type is QueryType.BOOLEAN:
+            return clusters, False
+
+        top_k = min(self.settings.RANKING_MEDCPT_TOP_K, len(clusters))
+        if top_k < 2:
+            return clusters, False
+
+        head = clusters[:top_k]
+        tail = clusters[top_k:]
+        winners: list[RawRecord] = [self._pick_winner(cluster) for cluster in head]
+
+        reranker = self._medcpt_reranker or MedCPTReranker.get(self.settings)
+        self._medcpt_reranker = reranker
+
+        try:
+            reranked_winners = reranker.rerank(query=query, records=winners)
+        except Exception as exc:  # noqa: BLE001 - defensive; reranker already catches
+            self.logger.warning(
+                "medcpt_rerank_exception",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return clusters, False
+
+        if len(reranked_winners) != len(winners):
+            return clusters, False
+
+        index_by_winner: dict[int, int] = {
+            id(winner): index for index, winner in enumerate(winners)
+        }
+        reordered_head: list[list[RawRecord]] = []
+        seen: set[int] = set()
+        for winner in reranked_winners:
+            original_index = index_by_winner.get(id(winner))
+            if original_index is None or original_index in seen:
+                continue
+            reordered_head.append(head[original_index])
+            seen.add(original_index)
+        if len(reordered_head) != len(head):
+            return clusters, False
+        return reordered_head + tail, True
+
+    def _maybe_pubmed_primary(
+        self,
+        clusters: list[list[RawRecord]],
+        query_type: QueryType | None,
+        search_mode: SearchMode | None,
+    ) -> tuple[list[list[RawRecord]], bool]:
+        """Pin top-N PubMed-sourced clusters to the head for FREE+Quick.
+
+        Rationale: client ranks PubMed's free-text relevance 7/10 vs our
+        4/10, so for the quick-mode UX the safest way to meet or beat
+        PubMed is to surface PubMed's own top ordering at positions 0..N-1
+        verbatim, then fill the tail with the consensus-weighted RRF
+        order for everything else. Other query types and deep modes keep
+        pure fused ordering so multi-source consensus still drives
+        reviewer workflows.
+        """
+        if query_type is not QueryType.FREE or search_mode is not SearchMode.QUICK:
+            return clusters, False
+        if len(clusters) < 2:
+            return clusters, False
+
+        top_n = 15
+        pubmed_head: list[tuple[int, list[list[RawRecord]]]] = []
+        other: list[list[RawRecord]] = []
+        seen_pubmed_source_ids: set[str] = set()
+
+        for cluster in clusters:
+            pubmed_records = [r for r in cluster if r.source is SourceType.PUBMED]
+            if not pubmed_records:
+                other.append(cluster)
+                continue
+            best_rank = min(
+                (r.source_rank for r in pubmed_records if r.source_rank and r.source_rank > 0),
+                default=None,
+            )
+            if best_rank is None:
+                other.append(cluster)
+                continue
+            source_id = pubmed_records[0].source_id
+            if source_id in seen_pubmed_source_ids:
+                other.append(cluster)
+                continue
+            seen_pubmed_source_ids.add(source_id)
+            pubmed_head.append((best_rank, [cluster]))
+
+        if not pubmed_head:
+            return clusters, False
+
+        pubmed_head.sort(key=lambda entry: (entry[0], entry[1][0][0].source_id))
+        pinned: list[list[RawRecord]] = []
+        pinned_clusters_set: set[int] = set()
+        for _, cluster_list in pubmed_head[:top_n]:
+            cluster = cluster_list[0]
+            pinned.append(cluster)
+            pinned_clusters_set.add(id(cluster))
+
+        tail: list[list[RawRecord]] = [
+            cluster for cluster in clusters if id(cluster) not in pinned_clusters_set
+        ]
+        if not pinned:
+            return clusters, False
+        return pinned + tail, True
+
     @staticmethod
     def _jaccard_similarity(
         left: frozenset[str],
@@ -341,21 +588,21 @@ class DedupService:
         winner: RawRecord,
         query_terms: frozenset[str],
         current_year: int,
+        *,
+        query_type: QueryType | None = None,
     ) -> float:
-        """Compute weighted RRF × title_boost × recency_boost for one cluster."""
+        """Compute weighted RRF × title × abstract × recency × citation boost."""
         rrf_k = self.settings.RANKING_RRF_K
-        source_weight = {
-            SourceType.PUBMED: self.settings.RANKING_PUBMED_WEIGHT,
-            SourceType.EUROPEPMC: 1.0,
-            SourceType.OPENALEX: 1.0,
-            SourceType.CLINICALTRIALS: 1.0,
-        }
+        source_weight = self._source_weights(query_type=query_type)
 
         rrf = 0.0
         for record in cluster:
             if not record.source_rank or record.source_rank <= 0:
                 continue
-            rrf += source_weight.get(record.source, 1.0) / (rrf_k + record.source_rank)
+            weight = source_weight.get(record.source, 1.0)
+            if weight <= 0.0:
+                continue
+            rrf += weight / (rrf_k + record.source_rank)
 
         if rrf <= 0.0:
             # No rank info available for this cluster. Zero means it lands at
@@ -365,8 +612,29 @@ class DedupService:
             return 0.0
 
         title_boost = self._title_match_boost(winner.title, query_terms)
+        abstract_boost = self._abstract_match_boost(winner.abstract, query_terms)
         recency_boost = self._recency_boost(winner.year, current_year=current_year)
-        return rrf * title_boost * recency_boost
+        citation_boost = self._citation_boost(cluster)
+        return rrf * title_boost * abstract_boost * recency_boost * citation_boost
+
+    def _source_weights(
+        self, query_type: QueryType | None,
+    ) -> dict[SourceType, float]:
+        """Return per-source RRF weights, honoring FREE-query CT.gov gating."""
+        ctgov_weight = self.settings.RANKING_CTGOV_WEIGHT
+        # ClinicalTrials.gov records are protocols, not peer-reviewed
+        # articles. For FREE queries we exclude them from fusion by
+        # default (weight 0 → skipped in the RRF loop). Other query
+        # types keep whatever weight is configured so boolean/PICO
+        # workflows that explicitly include CT.gov still surface it.
+        if query_type is not QueryType.FREE and ctgov_weight == 0.0:
+            ctgov_weight = 1.0
+        return {
+            SourceType.PUBMED: self.settings.RANKING_PUBMED_WEIGHT,
+            SourceType.EUROPEPMC: self.settings.RANKING_EUROPEPMC_WEIGHT,
+            SourceType.OPENALEX: self.settings.RANKING_OPENALEX_WEIGHT,
+            SourceType.CLINICALTRIALS: ctgov_weight,
+        }
 
     def _title_match_boost(self, title: str | None, query_terms: frozenset[str]) -> float:
         """Return 1.0..(1.0 + alpha) based on query-term coverage in title.
@@ -384,6 +652,54 @@ class DedupService:
             return 1.0
         matched = len(query_terms & title_tokens)
         return 1.0 + alpha * (matched / len(query_terms))
+
+    def _abstract_match_boost(
+        self, abstract: str | None, query_terms: frozenset[str],
+    ) -> float:
+        """Return 1.0..(1.0 + gamma) based on query-term coverage in abstract.
+
+        Weighted roughly half of the title boost (default 0.15 vs 0.30) so
+        title matches remain the dominant lexical signal — matches Google
+        Scholar's relative weighting. Uses the same tokenization /
+        stop-word rules as the title boost for consistency.
+        """
+        gamma = self.settings.RANKING_ABSTRACT_BOOST
+        if gamma <= 0.0 or not abstract or not query_terms:
+            return 1.0
+        abstract_tokens = set(self._TOKEN_PATTERN.findall(abstract.lower()))
+        if not abstract_tokens:
+            return 1.0
+        matched = len(query_terms & abstract_tokens)
+        return 1.0 + gamma * (matched / len(query_terms))
+
+    def _citation_boost(self, cluster: list[RawRecord]) -> float:
+        """Return 1.0..(1.0 + capped_boost) from the cluster's citation count.
+
+        Picks the max ``citation_count`` across all records in the cluster
+        (OpenAlex and Europe PMC typically supply this; PubMed and CT.gov
+        leave it ``None``). Applies ``log1p`` decay so a 10x citation gap
+        only translates to a modest ranking shift, then caps by
+        ``RANKING_CITATION_CAP`` so a single 10,000-citation seminal paper
+        cannot swamp fresh relevant niche work.
+        """
+        weight = self.settings.RANKING_CITATION_BOOST
+        cap = self.settings.RANKING_CITATION_CAP
+        if weight <= 0.0 or cap <= 0.0:
+            return 1.0
+
+        max_citations = 0
+        for record in cluster:
+            if record.citation_count is None:
+                continue
+            if record.citation_count > max_citations:
+                max_citations = record.citation_count
+
+        if max_citations <= 0:
+            return 1.0
+
+        # log1p(max)/8 normalizes so ~3k citations saturates the cap.
+        raw = weight * math.log1p(max_citations) / 8.0
+        return 1.0 + min(raw, cap)
 
     def _recency_boost(self, year: int | None, *, current_year: int) -> float:
         """Return 1.0..(1.0 + beta) decaying linearly over 5 years.
