@@ -7,14 +7,22 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from src.schemas.enums import StudyDesign
+
 
 # -- Paper Metadata (AI-extracted, used in table view) ------------------------
 
 class PaperMetadata(BaseModel):
-    """Structured metadata extracted from a paper for table view display."""
+    """Structured metadata extracted from a paper for table view display.
+
+    ``study_design`` is carried forward from the search result's
+    deterministically-classified ``UnifiedRecord.study_design`` at save time —
+    not extracted by the LLM. Every other field is LLM-extracted from the
+    paper's title and abstract.
+    """
 
     study_details: str = "Not reported"
-    study_design: str = "Not reported"
+    study_design: StudyDesign | None = None
     setting: str = "Not reported"
     interventions: str = "Not reported"
     sample_size: str = "Not reported"

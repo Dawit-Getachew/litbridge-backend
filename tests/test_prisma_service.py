@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyType
+from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyDesign
 from src.schemas.prisma import PrismaFilters
 from src.schemas.records import UnifiedRecord
 from src.services.prisma_service import PrismaService
@@ -18,7 +18,7 @@ def _build_unified_record(
     age_groups: list[AgeGroup] | None = None,
     age_min: int | None = None,
     age_max: int | None = None,
-    study_type: StudyType | None = None,
+    study_design: StudyDesign | None = None,
 ) -> UnifiedRecord:
     return UnifiedRecord(
         id=record_id,
@@ -31,7 +31,7 @@ def _build_unified_record(
         age_groups=age_groups or [],
         age_min=age_min,
         age_max=age_max,
-        study_type=study_type,
+        study_design=study_design,
     )
 
 
@@ -46,7 +46,7 @@ def _sample_records() -> list[UnifiedRecord]:
             age_groups=[AgeGroup.ADULT],
             age_min=18,
             age_max=65,
-            study_type=StudyType.INTERVENTIONAL,
+            study_design=StudyDesign.RCT,
         ),
         _build_unified_record(
             record_id="r2",
@@ -57,7 +57,7 @@ def _sample_records() -> list[UnifiedRecord]:
             age_groups=[AgeGroup.CHILD],
             age_min=0,
             age_max=17,
-            study_type=StudyType.OBSERVATIONAL,
+            study_design=StudyDesign.OBSERVATIONAL,
         ),
         _build_unified_record(
             record_id="r3",
@@ -68,7 +68,7 @@ def _sample_records() -> list[UnifiedRecord]:
             age_groups=[AgeGroup.ADULT, AgeGroup.OLDER_ADULT],
             age_min=18,
             age_max=90,
-            study_type=StudyType.INTERVENTIONAL,
+            study_design=StudyDesign.RCT,
         ),
         _build_unified_record(
             record_id="r4",
@@ -211,10 +211,10 @@ def test_age_range_overlap_filter() -> None:
     assert counts.oa_retrieved == 2
 
 
-def test_study_type_filter_single() -> None:
+def test_study_design_filter_single() -> None:
     service = PrismaService()
     records = _sample_records()
-    filters = PrismaFilters(study_types=[StudyType.INTERVENTIONAL])
+    filters = PrismaFilters(study_designs=[StudyDesign.RCT])
 
     counts = service.compute_counts(identified=10, records=records, filters=filters)
 
@@ -222,10 +222,10 @@ def test_study_type_filter_single() -> None:
     assert counts.oa_retrieved == 2
 
 
-def test_study_type_filter_multiple() -> None:
+def test_study_design_filter_multiple() -> None:
     service = PrismaService()
     records = _sample_records()
-    filters = PrismaFilters(study_types=[StudyType.INTERVENTIONAL, StudyType.OBSERVATIONAL])
+    filters = PrismaFilters(study_designs=[StudyDesign.RCT, StudyDesign.OBSERVATIONAL])
 
     counts = service.compute_counts(identified=10, records=records, filters=filters)
 
@@ -233,10 +233,12 @@ def test_study_type_filter_multiple() -> None:
     assert counts.oa_retrieved == 2
 
 
-def test_study_type_excludes_records_without_type() -> None:
+def test_study_design_excludes_records_with_no_design() -> None:
+    """Per Phase 1.5: unclassifiable records (None) are excluded from the filter."""
     service = PrismaService()
     records = _sample_records()
-    filters = PrismaFilters(study_types=[StudyType.OTHER])
+    # r4 has study_design=None; filtering for any specific design should drop it.
+    filters = PrismaFilters(study_designs=[StudyDesign.SYSTEMATIC_REVIEW])
 
     counts = service.compute_counts(identified=10, records=records, filters=filters)
 
@@ -244,12 +246,12 @@ def test_study_type_excludes_records_without_type() -> None:
     assert counts.oa_retrieved == 0
 
 
-def test_combined_age_and_study_type_filters() -> None:
+def test_combined_age_and_study_design_filters() -> None:
     service = PrismaService()
     records = _sample_records()
     filters = PrismaFilters(
         age_groups=[AgeGroup.ADULT],
-        study_types=[StudyType.INTERVENTIONAL],
+        study_designs=[StudyDesign.RCT],
     )
 
     counts = service.compute_counts(identified=10, records=records, filters=filters)

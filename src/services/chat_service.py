@@ -151,6 +151,30 @@ class ChatService:
                 },
             )
         else:
+            # The LLM stream yielded zero content. Most common causes are an
+            # upstream HTTP error (auth, rate limit, quota) — surfaced as a
+            # warning log in src/ai/llm_client.py — or a configuration issue.
+            # Emit an explicit ``error`` event so the frontend can render a
+            # meaningful message instead of an empty answer, then close with
+            # ``chat_completed`` so existing clients still terminate cleanly.
+            self.logger.warning(
+                "chat_llm_empty_response",
+                search_id=request.search_id,
+                conversation_id=conversation_id,
+                resolved_record_count=len(resolved_ids),
+            )
+            yield StreamEvent(
+                event="error",
+                data={
+                    "error": (
+                        "The language model returned no content. The LLM "
+                        "provider may be unavailable, rate-limited, or out "
+                        "of quota. Check Portal Engine logs for the upstream "
+                        "status code (look for 'llm_stream_http_error')."
+                    ),
+                    "code": "llm_empty_response",
+                },
+            )
             yield StreamEvent(
                 event="chat_completed",
                 data={"conversation_id": conversation_id, "message_id": None},

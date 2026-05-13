@@ -25,7 +25,7 @@ from src.schemas.enums import (
     QueryType,
     SearchMode,
     SourceType,
-    StudyType,
+    StudyDesign,
 )
 from src.schemas.records import PaginatedResults, RawRecord, UnifiedRecord
 from src.schemas.search import (
@@ -88,7 +88,7 @@ def test_unified_record_field_snapshot_locked() -> None:
         "age_groups": "list[AgeGroup]",
         "age_min": "Union[int, NoneType]",
         "age_max": "Union[int, NoneType]",
-        "study_type": "Union[StudyType, NoneType]",
+        "study_design": "Union[StudyDesign, NoneType]",
     }
     assert _field_summary(UnifiedRecord) == expected
 
@@ -240,13 +240,17 @@ def test_age_group_enum_values_locked() -> None:
     assert {member.value for member in AgeGroup} == {"child", "adult", "older_adult"}
 
 
-def test_study_type_enum_values_locked() -> None:
-    assert {member.value for member in StudyType} == {
-        "interventional",
+def test_study_design_enum_values_locked() -> None:
+    """Locked 8-value evidence-hierarchy taxonomy used by the LitPortal filter."""
+    assert {member.value for member in StudyDesign} == {
+        "guideline",
+        "meta_analysis",
+        "systematic_review",
+        "rct",
+        "review",
         "observational",
-        "expanded_access",
-        "diagnostic",
-        "other",
+        "case_report",
+        "expert_opinion",
     }
 
 
@@ -356,7 +360,7 @@ def test_unified_record_json_keys_are_a_subset_of_locked_field_names() -> None:
         "age_groups",
         "age_min",
         "age_max",
-        "study_type",
+        "study_design",
     }
     assert set(payload.keys()) == locked
 

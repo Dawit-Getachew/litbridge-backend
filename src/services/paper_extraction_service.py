@@ -16,6 +16,7 @@ from src.ai.llm_client import LLMClient
 from src.core.redis import build_cache_key
 from src.repositories.research_collection_repo import ResearchCollectionRepository
 from src.repositories.search_repo import SearchRepository
+from src.schemas.enums import StudyDesign
 from src.schemas.research_collection import PaperMetadata
 from src.workflow.prompts import build_paper_metadata_messages
 
@@ -131,16 +132,25 @@ class PaperExtractionService:
     ) -> PaperMetadata:
         """Extract metadata and persist to the database item.
 
-        If abstract is None, attempts to resolve it from the search
-        session's stored results using search_session_id + record_id.
+        Resolves abstract from the search session if not supplied. Always
+        carries forward ``study_design`` from the source UnifiedRecord (which
+        was deterministically classified by ``StudyDesignClassifier`` at search
+        time) — the LLM no longer fills ``study_design``.
         """
-        if not abstract and search_session_id and self.search_repo:
-            abstract = await self._resolve_abstract(record_id, search_session_id)
+        resolved_abstract: str | None = None
+        carried_study_design: StudyDesign | None = None
+        if search_session_id and self.search_repo:
+            resolved_abstract, carried_study_design = (
+                await self._resolve_record_fields(record_id, search_session_id)
+            )
+        effective_abstract = abstract or resolved_abstract
 
-        metadata = await self.extract_metadata(title, abstract, record_id)
+        metadata = await self.extract_metadata(title, effective_abstract, record_id)
+        # Carry forward the deterministic study_design (LLM no longer fills it).
+        metadata = metadata.model_copy(update={"study_design": carried_study_design})
         try:
             await self.repo.update_item_metadata(
-                item_id, metadata.model_dump(),
+                item_id, metadata.model_dump(mode="json"),
             )
         except Exception as exc:
             logger.warning(
@@ -176,25 +186,38 @@ class PaperExtractionService:
 
         return list(await asyncio.gather(*(_extract_one(it) for it in items)))
 
-    async def _resolve_abstract(
+    async def _resolve_record_fields(
         self, record_id: str, search_session_id: UUID,
-    ) -> str | None:
-        """Look up a record's abstract from the search session's stored results."""
+    ) -> tuple[str | None, StudyDesign | None]:
+        """Look up a record's abstract and study_design from the search session.
+
+        Returns ``(abstract, study_design)`` so the caller can carry the
+        deterministically-classified ``study_design`` forward into the
+        persisted collection-item metadata.
+        """
         try:
             session = await self.search_repo.get_session(str(search_session_id))
             if session is None or not session.results:
-                return None
+                return None, None
             for result in session.results:
                 if isinstance(result, dict) and result.get("id") == record_id:
-                    return result.get("abstract")
+                    abstract = result.get("abstract")
+                    raw_design = result.get("study_design")
+                    design: StudyDesign | None = None
+                    if isinstance(raw_design, str):
+                        try:
+                            design = StudyDesign(raw_design)
+                        except ValueError:
+                            design = None
+                    return abstract, design
         except Exception as exc:
             logger.warning(
-                "abstract_resolve_failed",
+                "record_fields_resolve_failed",
                 record_id=record_id,
                 session_id=str(search_session_id),
                 error=str(exc),
             )
-        return None
+        return None, None
 
     async def _cache_get(self, key: str) -> PaperMetadata | None:
         try:

@@ -88,14 +88,14 @@ async def test_prisma_counts_with_oa_filter(integration_client: AsyncClient, run
 
 
 @pytest.mark.asyncio
-async def test_prisma_counts_with_study_type_filter(integration_client: AsyncClient, run_search) -> None:
+async def test_prisma_counts_with_study_design_filter(integration_client: AsyncClient, run_search) -> None:
     search_id, response = await run_search(query="metformin cardiovascular")
     assert response.status_code == 200
 
     unfiltered_response = await integration_client.get(f"/api/v1/prisma/{search_id}")
     filtered_response = await integration_client.get(
         f"/api/v1/prisma/{search_id}",
-        params={"study_type": "interventional"},
+        params={"study_design": "rct"},
     )
     unfiltered = unfiltered_response.json()
     filtered = filtered_response.json()

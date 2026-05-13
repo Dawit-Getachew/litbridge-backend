@@ -111,7 +111,7 @@ def test_unified_record_json_matches_snake_case_contract() -> None:
         "age_groups",
         "age_min",
         "age_max",
-        "study_type",
+        "study_design",
     }
 
     assert set(payload.keys()) == expected_keys

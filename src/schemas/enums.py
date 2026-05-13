@@ -47,11 +47,31 @@ class AgeGroup(str, Enum):
     OLDER_ADULT = "older_adult"
 
 
-class StudyType(str, Enum):
-    """Publication / trial study-design classification."""
+class StudyDesign(str, Enum):
+    """Evidence-hierarchy classification for the LitPortal Study Design filter.
 
-    INTERVENTIONAL = "interventional"
+    Eight categories aligned to clinician decision-making. Records that cannot
+    be confidently classified return ``None`` rather than falling into a
+    default bucket; the frontend filter excludes ``None`` records.
+    """
+
+    GUIDELINE = "guideline"
+    META_ANALYSIS = "meta_analysis"
+    SYSTEMATIC_REVIEW = "systematic_review"
+    RCT = "rct"
+    REVIEW = "review"
     OBSERVATIONAL = "observational"
-    EXPANDED_ACCESS = "expanded_access"
-    DIAGNOSTIC = "diagnostic"
-    OTHER = "other"
+    CASE_REPORT = "case_report"
+    EXPERT_OPINION = "expert_opinion"
+
+
+STUDY_DESIGN_DISPLAY_LABELS: dict[StudyDesign, str] = {
+    StudyDesign.GUIDELINE: "High Quality (Major Organization) Guideline",
+    StudyDesign.META_ANALYSIS: "Meta Analysis",
+    StudyDesign.SYSTEMATIC_REVIEW: "Systematic Literature Review",
+    StudyDesign.RCT: "Randomized Controlled Trial",
+    StudyDesign.REVIEW: "Review Article",
+    StudyDesign.OBSERVATIONAL: "Observational Study",
+    StudyDesign.CASE_REPORT: "Case Report",
+    StudyDesign.EXPERT_OPINION: "Expert Opinion",
+}

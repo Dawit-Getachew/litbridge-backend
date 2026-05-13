@@ -208,6 +208,14 @@ class PubMedRepository(BaseSourceRepository):
             elif last_name:
                 authors.append(last_name)
 
+        publication_types: list[str] = []
+        for pub_type in article.findall(
+            "./MedlineCitation/Article/PublicationTypeList/PublicationType"
+        ):
+            text = self._element_text(pub_type)
+            if text:
+                publication_types.append(text)
+
         return RawRecord(
             source_id=pmid,
             source=self.source,
@@ -218,7 +226,8 @@ class PubMedRepository(BaseSourceRepository):
             doi=doi,
             pmid=pmid,
             abstract=abstract or None,
-            raw_data={"pmid": pmid},
+            publication_types=publication_types,
+            raw_data={"pmid": pmid, "publication_types": publication_types},
         )
 
     def _first_text(self, parent: ET.Element, xpath: str) -> str | None:

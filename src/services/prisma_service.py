@@ -78,11 +78,11 @@ class PrismaService:
                 if record.age_min is None or record.age_min <= filters.age_max
             ]
 
-        if filters.study_types:
-            allowed_types = set(filters.study_types)
+        if filters.study_designs:
+            allowed_designs = set(filters.study_designs)
             filtered = [
                 record for record in filtered
-                if record.study_type is not None and record.study_type in allowed_types
+                if record.study_design is not None and record.study_design in allowed_designs
             ]
 
         return filtered

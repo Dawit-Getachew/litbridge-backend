@@ -113,6 +113,12 @@ class OpenAlexRepository(BaseSourceRepository):
         ids = work.get("ids") or {}
         pmid = self._extract_pmid(ids.get("pmid")) if isinstance(ids, dict) else None
 
+        publication_types: list[str] = []
+        for key in ("type", "type_crossref"):
+            value = work.get(key)
+            if isinstance(value, str) and value.strip():
+                publication_types.append(value.strip())
+
         return RawRecord(
             source_id=str(openalex_id),
             source=self.source,
@@ -126,6 +132,7 @@ class OpenAlexRepository(BaseSourceRepository):
             pdf_url=oa_url,
             oa_status=OAStatus.OPEN if is_oa else OAStatus.CLOSED,
             citation_count=self._as_int(work.get("cited_by_count")),
+            publication_types=publication_types,
             raw_data=work,
         )
 

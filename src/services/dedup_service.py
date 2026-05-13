@@ -15,8 +15,9 @@ from src.core.config import Settings, get_settings
 from src.core.exceptions import DeduplicationError
 from src.ranking.bm25_reranker import BM25Reranker
 from src.ranking.medcpt_reranker import MedCPTReranker
-from src.schemas.enums import AgeGroup, OAStatus, QueryType, SearchMode, SourceType, StudyType
+from src.schemas.enums import AgeGroup, OAStatus, QueryType, SearchMode, SourceType
 from src.schemas.records import RawRecord, UnifiedRecord
+from src.services.study_design_classifier import classify_cluster as classify_study_design
 
 
 class _UnionFind:
@@ -852,7 +853,7 @@ class DedupService:
             sources_found_in.append(record.source)
 
         age_groups, age_min, age_max = self._extract_age_metadata(cluster)
-        study_type = self._extract_study_type(cluster, title, abstract)
+        study_design = classify_study_design(cluster)
 
         return UnifiedRecord(
             id=str(uuid4()),
@@ -871,7 +872,7 @@ class DedupService:
             age_groups=age_groups,
             age_min=age_min,
             age_max=age_max,
-            study_type=study_type,
+            study_design=study_design,
         )
 
     # -- ClinicalTrials.gov stdAge label -> AgeGroup mapping --
@@ -880,29 +881,6 @@ class DedupService:
         "adult": AgeGroup.ADULT,
         "older_adult": AgeGroup.OLDER_ADULT,
     }
-
-    # -- OpenAlex/Crossref work-type -> StudyType mapping --
-    _OPENALEX_TYPE_MAP: dict[str, StudyType] = {
-        "clinical-trial": StudyType.INTERVENTIONAL,
-        "article": StudyType.OBSERVATIONAL,
-        "review": StudyType.OTHER,
-        "book-chapter": StudyType.OTHER,
-        "book": StudyType.OTHER,
-        "dataset": StudyType.OTHER,
-        "preprint": StudyType.OTHER,
-        "dissertation": StudyType.OTHER,
-        "editorial": StudyType.OTHER,
-        "letter": StudyType.OTHER,
-        "erratum": StudyType.OTHER,
-        "report": StudyType.OTHER,
-    }
-
-    _STUDY_TYPE_PATTERNS: list[tuple[re.Pattern[str], StudyType]] = [
-        (re.compile(r"\b(randomized|randomised|rct|controlled trial|phase [i1-4]+)\b", re.IGNORECASE), StudyType.INTERVENTIONAL),
-        (re.compile(r"\b(cohort|cross.?sectional|case.?control|longitudinal|registry|surveillance|epidemiolog|prevalence)\b", re.IGNORECASE), StudyType.OBSERVATIONAL),
-        (re.compile(r"\bexpanded access\b", re.IGNORECASE), StudyType.EXPANDED_ACCESS),
-        (re.compile(r"\b(diagnostic accuracy|sensitivity and specificity|screening test|predictive value|ROC curve|biomarker validation)\b", re.IGNORECASE), StudyType.DIAGNOSTIC),
-    ]
 
     _AGE_PATTERNS: list[tuple[re.Pattern[str], AgeGroup]] = [
         (re.compile(r"\b(child(?:ren)?|pediatric|paediatric|infant|neonat|adolescent|juvenile)\b", re.IGNORECASE), AgeGroup.CHILD),
@@ -977,49 +955,6 @@ class DedupService:
         if "day" in lower:
             return 0
         return number
-
-    def _extract_study_type(
-        self, cluster: list[RawRecord], title: str, abstract: str | None,
-    ) -> StudyType | None:
-        """Derive study type from structured fields or text heuristics."""
-        for record in cluster:
-            st = self._study_type_from_raw(record)
-            if st is not None:
-                return st
-
-        text = f"{title} {abstract or ''}"
-        for pattern, study_type in self._STUDY_TYPE_PATTERNS:
-            if pattern.search(text):
-                return study_type
-        return None
-
-    def _study_type_from_raw(self, record: RawRecord) -> StudyType | None:
-        """Extract study type from ClinicalTrials or OpenAlex raw_data."""
-        raw = record.raw_data
-        if not raw:
-            return None
-
-        if record.source is SourceType.CLINICALTRIALS:
-            protocol = raw.get("protocolSection", {})
-            if isinstance(protocol, dict):
-                design = protocol.get("designModule", {})
-                if isinstance(design, dict):
-                    raw_type = design.get("studyType", "")
-                    if isinstance(raw_type, str):
-                        mapped = raw_type.strip().lower().replace(" ", "_")
-                        try:
-                            return StudyType(mapped)
-                        except ValueError:
-                            if mapped:
-                                return StudyType.OTHER
-            return None
-
-        if record.source is SourceType.OPENALEX:
-            work_type = raw.get("type", "")
-            if isinstance(work_type, str) and work_type.strip():
-                return self._OPENALEX_TYPE_MAP.get(work_type.strip().lower())
-
-        return None
 
     @staticmethod
     def _combined_text(cluster: list[RawRecord]) -> str:

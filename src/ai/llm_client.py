@@ -6,9 +6,12 @@ import json
 from collections.abc import AsyncGenerator
 
 import httpx
+import structlog
 
 from src.core.config import Settings, get_settings
 from src.schemas.records import UnifiedRecord
+
+_logger = structlog.get_logger(__name__)
 
 TLDR_SYSTEM_PROMPT = "Generate a one-sentence TLDR summary of this biomedical paper. Be concise and precise."
 
@@ -184,7 +187,12 @@ class LLMClient:
         payload: dict,
         timeout: float = 60.0,
     ) -> AsyncGenerator[str, None]:
-        """Shared streaming logic for all streaming endpoints."""
+        """Shared streaming logic for all streaming endpoints.
+
+        Swallows the connection on error but emits a structured log line so
+        operators can diagnose silent empty streams (rate limits, quota,
+        auth, etc.) without having to attach a debugger.
+        """
         try:
             async with self.client.stream(
                 "POST",
@@ -194,6 +202,20 @@ class LLMClient:
                 timeout=timeout,
             ) as response:
                 if response.status_code >= 400:
+                    body_preview = ""
+                    try:
+                        body_preview = (await response.aread()).decode(
+                            "utf-8", errors="replace"
+                        )[:500]
+                    except Exception:
+                        pass
+                    _logger.warning(
+                        "llm_stream_http_error",
+                        provider=self.settings.LLM_PROVIDER,
+                        model=self.model,
+                        status=response.status_code,
+                        body=body_preview,
+                    )
                     return
 
                 async for line in response.aiter_lines():
@@ -203,7 +225,14 @@ class LLMClient:
                     if chunk == "[DONE]":
                         break
                     yield chunk
-        except Exception:
+        except Exception as exc:
+            _logger.warning(
+                "llm_stream_exception",
+                provider=self.settings.LLM_PROVIDER,
+                model=self.model,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             return
 
     def _headers(self) -> dict[str, str]:

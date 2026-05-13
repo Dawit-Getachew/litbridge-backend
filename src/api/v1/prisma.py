@@ -11,7 +11,7 @@ from src.core.deps import get_current_user_optional, get_prisma_service, get_sea
 from src.core.exceptions import SearchNotFoundError
 from src.models.user import User
 from src.repositories.search_repo import SearchRepository
-from src.schemas.enums import AgeGroup, SourceType, StudyType
+from src.schemas.enums import AgeGroup, SourceType, StudyDesign
 from src.schemas.prisma import PrismaCounts, PrismaFilters
 from src.schemas.records import UnifiedRecord
 from src.services.prisma_service import PrismaService
@@ -51,7 +51,7 @@ async def get_prisma_counts(
     age_group: str | None = Query(default=None),
     age_min: int | None = Query(default=None),
     age_max: int | None = Query(default=None),
-    study_type: str | None = Query(default=None),
+    study_design: str | None = Query(default=None),
     search_repo: SearchRepository = Depends(get_search_repo),
     prisma_service: PrismaService = Depends(get_prisma_service),
     user: User | None = Depends(get_current_user_optional),
@@ -71,7 +71,7 @@ async def get_prisma_counts(
         age_groups=_parse_enum_list(age_group, AgeGroup, "age_group"),
         age_min=age_min,
         age_max=age_max,
-        study_types=_parse_enum_list(study_type, StudyType, "study_type"),
+        study_designs=_parse_enum_list(study_design, StudyDesign, "study_design"),
     )
     identified = session.total_identified or len(records)
     return prisma_service.compute_counts(

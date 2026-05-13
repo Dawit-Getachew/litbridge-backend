@@ -153,8 +153,33 @@ class EuropePMCRepository(BaseSourceRepository):
             abstract=self._clean_str(entry.get("abstractText")),
             oa_status=self._parse_oa_status(entry.get("isOpenAccess")),
             citation_count=self._parse_citation_count(entry.get("citedByCount")),
+            publication_types=self._parse_pub_types(entry.get("pubTypeList")),
             raw_data=entry,
         )
+
+    @staticmethod
+    def _parse_pub_types(value: Any) -> list[str]:
+        """Extract Europe PMC publication types.
+
+        The Europe PMC REST API returns ``pubTypeList`` as a dict with a
+        ``pubType`` key whose value is a string or list of strings. Older
+        responses may surface ``pubType`` directly as a semicolon-separated
+        string. Normalize to a list of trimmed strings.
+        """
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            inner = value.get("pubType")
+            if isinstance(inner, list):
+                return [str(item).strip() for item in inner if str(item).strip()]
+            if isinstance(inner, str):
+                return [part.strip() for part in inner.split(";") if part.strip()]
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(";") if part.strip()]
+        return []
 
     @staticmethod
     def _parse_citation_count(value: Any) -> int | None:

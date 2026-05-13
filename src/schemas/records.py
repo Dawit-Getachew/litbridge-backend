@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyType
+from src.schemas.enums import AgeGroup, OAStatus, SourceType, StudyDesign
 
 
 class UnifiedRecord(BaseModel):
@@ -29,7 +29,7 @@ class UnifiedRecord(BaseModel):
     age_groups: list[AgeGroup] = Field(default_factory=list)
     age_min: int | None = None
     age_max: int | None = None
-    study_type: StudyType | None = None
+    study_design: StudyDesign | None = None
 
 
 class PaginatedResults(BaseModel):
@@ -55,6 +55,7 @@ class RawRecord(BaseModel):
     abstract: str | None = None
     pdf_url: str | None = None
     oa_status: OAStatus = OAStatus.UNKNOWN
+    publication_types: list[str] = Field(default_factory=list)
     raw_data: dict[str, Any] = Field(default_factory=dict)
     # Internal-only ranking signal: 1-based position in the source's relevance-
     # sorted result list. 0 means "unranked" (e.g. legacy cached records). Not

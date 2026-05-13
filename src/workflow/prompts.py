@@ -95,7 +95,6 @@ cannot be determined from the title and abstract, use exactly "Not reported".
 Return a JSON object with this exact schema:
 {
   "study_details": "Brief description of study purpose and context",
-  "study_design": "e.g., RCT, cohort study, meta-analysis, case-control, cross-sectional",
   "setting": "e.g., hospital, community, primary care, multicenter",
   "interventions": "Treatment or exposure being studied",
   "sample_size": "Number of participants (e.g., 'N=150' or '150 patients')",
@@ -109,9 +108,9 @@ Return a JSON object with this exact schema:
 Rules:
 - Be concise. Each field should be 1-2 sentences maximum.
 - Use exact values from the paper when available (sample sizes, p-values, confidence intervals).
-- For study_design, use standard terminology (RCT, cohort, case-control, etc.).
 - If a field genuinely cannot be determined from the abstract, return "Not reported".
 - Do not fabricate or infer statistics not present in the abstract.
+- Do NOT emit a "study_design" key — that field is populated deterministically from upstream publication-type metadata, not by you.
 - Return ONLY valid JSON, no markdown fences or explanation."""
 
 
