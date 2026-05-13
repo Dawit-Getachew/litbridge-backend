@@ -13,6 +13,12 @@ class ChatRequest(BaseModel):
     search_id: str
     message: str = Field(..., min_length=1, max_length=4000)
     conversation_id: str | None = None
+    # Week-1 LitPortal merger (proposal §3.3.B): when the caller has explicitly
+    # selected which citations should ground the answer, send them here. The
+    # service skips natural-language reference resolution and uses these
+    # records as the ground-truth context. Empty/null preserves the legacy
+    # behavior (top-N + resolve_references).
+    selected_record_ids: list[str] | None = None
 
 
 class ResolvedRecord(BaseModel):

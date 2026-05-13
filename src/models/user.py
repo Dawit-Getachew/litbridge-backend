@@ -29,6 +29,12 @@ class User(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     auth_provider: Mapped[str] = mapped_column(String(32), nullable=False, server_default="'email'")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set when this user is provisioned via the LitPulse JWT bridge (Week-1 merger).
+    # Stores the LitPulse-side `user_id` claim so we can match the same caller on
+    # subsequent requests without ambiguity even if their email later changes.
+    litpulse_user_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True,
+    )
 
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(
         back_populates="user", cascade="all, delete-orphan", lazy="selectin",

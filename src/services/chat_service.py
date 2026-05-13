@@ -67,8 +67,31 @@ class ChatService:
             )
             conversation_id = str(conversation.id)
 
-        # 3. Resolve natural language paper references
-        resolved = resolve_references(request.message, all_records)
+        # 3. Resolve grounding records.
+        #    Week-1 LitPortal merger (proposal §3.3.B): when the client sends
+        #    an explicit `selected_record_ids` set, those are the ground-truth
+        #    context — the LLM must cite only from them. Unknown ids are
+        #    silently dropped with a warning so a stale frontend cache cannot
+        #    hard-fail the answer; if every supplied id is unknown we fall
+        #    back to natural-language resolution to keep the request usable.
+        if request.selected_record_ids:
+            selected_set = {rid for rid in request.selected_record_ids if rid}
+            resolved = [r for r in all_records if r.id in selected_set]
+            unknown = selected_set - {r.id for r in resolved}
+            if unknown:
+                self.logger.warning(
+                    "chat_selected_ids_unknown",
+                    search_id=request.search_id,
+                    unknown_count=len(unknown),
+                    accepted_count=len(resolved),
+                )
+            if not resolved:
+                # Every id was stale — fall back rather than send an empty
+                # context to the LLM (which would produce uncited speculation).
+                resolved = resolve_references(request.message, all_records)
+        else:
+            resolved = resolve_references(request.message, all_records)
+
         resolved_summaries = [
             ResolvedRecord(
                 id=r.id,
@@ -102,6 +125,7 @@ class ChatService:
             all_records=all_records,
             resolved_records=resolved,
             conversation=conversation,
+            grounding_strict=bool(request.selected_record_ids and resolved),
         )
 
         # 6. Stream response token-by-token
@@ -138,8 +162,16 @@ class ChatService:
         all_records: list[UnifiedRecord],
         resolved_records: list[UnifiedRecord],
         conversation,
+        grounding_strict: bool = False,
     ) -> list[dict[str, str]]:
-        """Construct the full message list for the LLM call."""
+        """Construct the full message list for the LLM call.
+
+        When ``grounding_strict`` is true, the resolved_records came from an
+        explicit ``selected_record_ids`` list (Week-1 LitPortal contract). The
+        prompt is tightened so the model cites only those records and uses
+        ``[n]`` markers matching the numbered list — the LitPortal grounded-
+        answer panel renders those markers as inline footnotes.
+        """
 
         # System prompt with search context
         context_records = resolved_records if resolved_records else all_records[:self.max_context_records]
@@ -155,7 +187,17 @@ class ChatService:
             f"The user's search returned {len(all_records)} articles. "
         )
 
-        if resolved_records:
+        if grounding_strict:
+            system_content += (
+                f"The user has explicitly selected the following {len(resolved_records)} "
+                f"paper(s) to ground your answer. You must cite only these papers and "
+                f"reference them using bracketed numeric markers that match the list "
+                f"below (e.g. [1], [2]). Do not introduce other papers, do not invent "
+                f"citations, and explicitly note any limitations the selected evidence "
+                f"cannot resolve.\n\n"
+                f"{records_context}"
+            )
+        elif resolved_records:
             system_content += (
                 f"The user appears to be referring to the following {len(resolved_records)} paper(s):\n\n"
                 f"{records_context}"

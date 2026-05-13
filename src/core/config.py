@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     OTP_EXPIRE_SECONDS: int = 300
     OTP_MAX_ATTEMPTS: int = 5
 
+    # Cross-service auth bridge for the LitPulse + LitPortal Week-1 merger.
+    # When enabled, `get_current_user` accepts JWTs minted by the LitPulse
+    # backend (HS256 signed with LITPULSE_JWT_SECRET_KEY) in addition to
+    # native OTP tokens. On first contact the LitPulse user is upserted into
+    # this database keyed by `litpulse_user_id`. See WEEK1_INTEGRATION_NOTE.
+    LITPULSE_JWT_SECRET_KEY: str = ""
+    LITPULSE_JWT_ENABLED: bool = False
+
     # Cross-source ranking knobs (Phase 2 — weighted Reciprocal Rank Fusion).
     # Defaults are deliberately conservative; safe to deploy without env edits.
     # See `src/services/dedup_service.py` for the formulas these feed into.

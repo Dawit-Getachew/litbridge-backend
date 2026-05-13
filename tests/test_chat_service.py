@@ -250,3 +250,89 @@ async def test_stream_chat_includes_records_context_in_llm_messages() -> None:
     system_msg = llm.last_messages[0]
     assert system_msg["role"] == "system"
     assert "Important Study About Cancer Treatment" in system_msg["content"]
+
+
+# ---------------------------------------------------------------------------
+# Week-1 LitPortal merger — selected_record_ids contract (proposal §3.3.B)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_selected_record_ids_filters_context_to_explicit_set() -> None:
+    """Explicit selection should ground the LLM only on the chosen records."""
+    records = [
+        _build_record("r1", "RCT of Drug A", ["Alpha"], 2024),
+        _build_record("r2", "Cohort of Drug B", ["Beta"], 2023),
+        _build_record("r3", "Review of Drug C", ["Gamma"], 2022),
+    ]
+    repo = FakeConversationRepo(records=records)
+    llm = FakeLLMClient()
+
+    service = ChatService(conversation_repo=repo, llm_client=llm)
+
+    request = ChatRequest(
+        search_id="s1",
+        message="Synthesize the evidence",
+        selected_record_ids=["r1", "r3"],
+    )
+    events = [event async for event in service.stream_chat(request)]
+
+    started = next(e for e in events if e.event == "chat_started")
+    resolved_ids = {r["id"] for r in started.data.get("resolved_records", [])}
+    assert resolved_ids == {"r1", "r3"}, "Only selected ids should ground the answer"
+
+    system_msg = llm.last_messages[0]
+    assert "RCT of Drug A" in system_msg["content"]
+    assert "Review of Drug C" in system_msg["content"]
+    assert "Cohort of Drug B" not in system_msg["content"], (
+        "Unselected record must not leak into the grounding context"
+    )
+    # Strict-grounding banner present.
+    assert "[1]" in system_msg["content"] or "bracketed numeric markers" in system_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_selected_record_ids_fallback_when_all_unknown() -> None:
+    """Stale/unknown ids should not produce an empty context — fall back to NL resolution."""
+    records = [
+        _build_record("r1", "Real paper one", ["A"], 2024),
+        _build_record("r2", "Real paper two", ["B"], 2024),
+    ]
+    repo = FakeConversationRepo(records=records)
+    llm = FakeLLMClient()
+
+    service = ChatService(conversation_repo=repo, llm_client=llm)
+
+    request = ChatRequest(
+        search_id="s1",
+        message="Compare these",
+        selected_record_ids=["stale-1", "stale-2"],
+    )
+    events = [event async for event in service.stream_chat(request)]
+
+    # The chat must still produce a normal response (not an error).
+    assert any(e.event == "chat_completed" for e in events)
+    # And the LLM must have received at least the top-N context (fallback).
+    system_msg = llm.last_messages[0]
+    assert "Real paper one" in system_msg["content"] or "Real paper two" in system_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_no_selected_record_ids_preserves_legacy_behavior() -> None:
+    """Without selection, behavior matches the pre-Week-1 chat path."""
+    records = [
+        _build_record("r1", "Zhang Trial", ["Zhang L"], 2024),
+        _build_record("r2", "Other Paper", ["Other"], 2020),
+    ]
+    repo = FakeConversationRepo(records=records)
+    llm = FakeLLMClient()
+
+    service = ChatService(conversation_repo=repo, llm_client=llm)
+
+    # NL reference resolution should still pick up the Zhang reference.
+    request = ChatRequest(search_id="s1", message="Explain the Zhang 2024 paper")
+    events = [event async for event in service.stream_chat(request)]
+
+    started = next(e for e in events if e.event == "chat_started")
+    resolved_ids = {r["id"] for r in started.data.get("resolved_records", [])}
+    assert "r1" in resolved_ids

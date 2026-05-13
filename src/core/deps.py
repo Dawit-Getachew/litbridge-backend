@@ -310,25 +310,90 @@ async def get_auth_service(
     )
 
 
+async def _resolve_litpulse_token(
+    raw_token: str,
+    user_repo: UserRepository,
+    settings: Settings,
+) -> User | None:
+    """Try to validate `raw_token` as a LitPulse-issued JWT.
+
+    Returns the upserted Portal-Engine user on success, or None when the token
+    is not recognized as a LitPulse token (so the caller can decide between
+    "fall through to next validator" and "raise 401").
+    """
+    if not settings.LITPULSE_JWT_ENABLED or not settings.LITPULSE_JWT_SECRET_KEY:
+        return None
+    try:
+        payload = jwt.decode(
+            raw_token,
+            settings.LITPULSE_JWT_SECRET_KEY,
+            algorithms=["HS256"],
+        )
+    except jwt.InvalidTokenError:
+        return None
+
+    if payload.get("type") != "access":
+        return None
+
+    litpulse_user_id = payload.get("user_id")
+    email = payload.get("email")
+    if not litpulse_user_id or not email:
+        # A valid signature but a payload that doesn't match the documented
+        # LitPulse contract — log and treat as auth failure to surface the bug.
+        logger.warning(
+            "litpulse_token_missing_claims",
+            has_user_id=bool(litpulse_user_id),
+            has_email=bool(email),
+        )
+        raise AuthenticationError("LitPulse token missing required claims.")
+
+    user = await user_repo.upsert_litpulse_user(
+        litpulse_user_id=str(litpulse_user_id),
+        email=str(email),
+    )
+    return user if user.is_active else None
+
+
 async def get_current_user(
     token: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> User:
-    """Decode JWT and load the authenticated user, or raise 401."""
+    """Decode JWT and load the authenticated user, or raise 401.
 
+    Two validator paths:
+      1. Native Portal Engine OTP-issued token (HS256, secret = SECRET_KEY).
+      2. LitPulse-issued token (HS256, secret = LITPULSE_JWT_SECRET_KEY) when
+         LITPULSE_JWT_ENABLED. On first contact the user is upserted by
+         (litpulse_user_id, email).
+
+    The two token formats are distinguishable by signature — they share the
+    algorithm but use different secrets, so trying native first is cheap and
+    we never accidentally "trust" a LitPulse-shaped payload signed by the
+    Portal Engine secret.
+    """
+    raw_token = token.credentials
+    settings = get_settings()
+
+    # 1. Native Portal Engine token.
     try:
-        payload = decode_access_token(token.credentials)
+        payload = decode_access_token(raw_token)
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise AuthenticationError("Malformed token payload.")
+        user = await user_repo.get_by_id(UUID(user_id))
+        if user is None or not user.is_active:
+            raise AuthenticationError("User not found or deactivated.")
+        return user
     except jwt.InvalidTokenError:
-        raise AuthenticationError("Invalid or expired access token.")
+        # Fall through to the LitPulse path; signature didn't match this secret.
+        pass
 
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise AuthenticationError("Malformed token payload.")
+    # 2. LitPulse-issued token (cross-service auth bridge).
+    litpulse_user = await _resolve_litpulse_token(raw_token, user_repo, settings)
+    if litpulse_user is not None:
+        return litpulse_user
 
-    user = await user_repo.get_by_id(UUID(user_id))
-    if user is None or not user.is_active:
-        raise AuthenticationError("User not found or deactivated.")
-    return user
+    raise AuthenticationError("Invalid or expired access token.")
 
 
 async def get_current_user_optional(
