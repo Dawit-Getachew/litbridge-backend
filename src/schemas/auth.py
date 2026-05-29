@@ -29,6 +29,21 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LoginRequest(BaseModel):
+    """Body for POST /auth/login (email + password, delegated to Identity)."""
+
+    email: EmailStr
+    password: str
+
+
+class SignupRequest(BaseModel):
+    """Body for POST /auth/signup (email + password, delegated to Identity)."""
+
+    email: EmailStr
+    password: str
+    full_name: str | None = Field(default=None, max_length=255)
+
+
 # ── Responses ────────────────────────────────────────────────────
 
 class TokenResponse(BaseModel):

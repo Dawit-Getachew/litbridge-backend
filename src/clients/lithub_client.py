@@ -93,6 +93,23 @@ class LitHubClient:
             {"user_id": str(user_id), "item": body},
         )
 
+    async def internal_list_library(
+        self,
+        user_id: UUID,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Read a user's central LitHub library (keyed by Identity sub).
+
+        Lets LitPortal surface papers saved from LitPulse (and its own
+        collection saves) in one unified list, via the service-token internal
+        endpoint — works regardless of the inbound token type.
+        """
+        q: dict[str, Any] = {"user_id": str(user_id)}
+        if params:
+            q.update({k: v for k, v in params.items() if v is not None})
+        return await self._internal_get("/api/v1/internal/library", params=q)
+
     async def internal_papers_bulk(
         self, paper_ids: list[UUID | str],
     ) -> list[dict[str, Any]]:

@@ -111,13 +111,30 @@ class ChatService:
             },
         )
 
-        # 4. Persist the user message
-        await self.conversation_repo.add_message(
-            conversation_id=conversation_id,
-            role="user",
-            content=request.message,
-            record_ids=resolved_ids or None,
-        )
+        # 4. Persist the user message. Failures here must be LOUD (the whole
+        #    point of the chat is that the question lands in history) — log with
+        #    full context and surface an error rather than streaming an answer
+        #    that was never saved.
+        try:
+            await self.conversation_repo.add_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=request.message,
+                record_ids=resolved_ids or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error(
+                "chat_user_message_persist_failed",
+                conversation_id=conversation_id,
+                search_id=request.search_id,
+                error=str(exc),
+                exc_info=True,
+            )
+            yield StreamEvent(
+                event="error",
+                data={"error": "Failed to save your message. Please retry."},
+            )
+            return
 
         # 5. Build LLM message list
         messages = self._build_messages(
@@ -137,12 +154,26 @@ class ChatService:
         # 7. Persist the assistant response
         assistant_content = "".join(full_response)
         if assistant_content.strip():
-            message = await self.conversation_repo.add_message(
-                conversation_id=conversation_id,
-                role="assistant",
-                content=assistant_content,
-                record_ids=resolved_ids or None,
-            )
+            try:
+                message = await self.conversation_repo.add_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=assistant_content,
+                    record_ids=resolved_ids or None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.error(
+                    "chat_assistant_message_persist_failed",
+                    conversation_id=conversation_id,
+                    search_id=request.search_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                yield StreamEvent(
+                    event="error",
+                    data={"error": "Answer generated but could not be saved to history."},
+                )
+                return
             yield StreamEvent(
                 event="chat_completed",
                 data={

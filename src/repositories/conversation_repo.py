@@ -72,6 +72,8 @@ class ConversationRepository:
     ) -> Message:
         """Append a message to a conversation and bump the message count."""
         conv_uuid = self._parse_uuid(conversation_id)
+        if conv_uuid is None:
+            raise ValueError(f"Cannot add message: invalid conversation_id {conversation_id!r}")
         message = Message(
             conversation_id=conv_uuid,
             role=role,

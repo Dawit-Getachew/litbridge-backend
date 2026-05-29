@@ -84,6 +84,21 @@ class _FakeIdentityClient:
         self.calls.append(("request_otp", email))
         return {"message": "sent"}
 
+    async def login(self, email, password):
+        self.calls.append(("login", email, password))
+        return {
+            "access_token": "identity-access", "refresh_token": "identity-refresh",
+            "token_type": "bearer", "expires_in": 1800,
+        }
+
+    async def signup(self, body):
+        self.calls.append(("signup", body))
+        return {
+            "access_token": "identity-access", "refresh_token": "identity-refresh",
+            "token_type": "bearer", "expires_in": 1800,
+            "user": {"id": "x", "email": body["email"]},
+        }
+
     async def verify_otp(self, email, code):
         self.calls.append(("verify_otp", email, code))
         return {
@@ -120,6 +135,37 @@ async def test_request_otp_delegates_to_identity():
     svc = _auth_service(fake)
     await svc.request_otp("alice@example.com")
     assert ("request_otp", "alice@example.com") in fake.calls
+
+
+async def test_password_login_delegates_to_identity_and_preserves_shape():
+    fake = _FakeIdentityClient()
+    svc = _auth_service(fake)
+    token = await svc.login("alice@example.com", "StrongPass1!aa")
+    assert token.access_token == "identity-access"
+    assert token.refresh_token == "identity-refresh"
+    assert token.token_type == "bearer"
+    assert token.expires_in == 1800
+    assert ("login", "alice@example.com", "StrongPass1!aa") in fake.calls
+
+
+async def test_password_signup_delegates_to_identity():
+    fake = _FakeIdentityClient()
+    svc = _auth_service(fake)
+    token = await svc.signup("bob@example.com", "StrongPass1!aa", "Bob")
+    assert token.access_token == "identity-access"
+    assert fake.calls[-1][0] == "signup"
+    assert fake.calls[-1][1]["email"] == "bob@example.com"
+    assert fake.calls[-1][1]["signup_method"] == "password"
+
+
+async def test_password_login_disabled_without_identity(monkeypatch):
+    monkeypatch.setenv("LITPORTAL_USE_IDENTITY", "false")
+    get_settings.cache_clear()
+    from src.core.exceptions import AuthenticationError
+
+    svc = _auth_service(_FakeIdentityClient())
+    with pytest.raises(AuthenticationError):
+        await svc.login("alice@example.com", "x")
 
 
 async def test_verify_otp_delegates_and_preserves_token_shape():

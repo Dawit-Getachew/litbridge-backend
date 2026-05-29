@@ -8,16 +8,57 @@ from fastapi.security import HTTPAuthorizationCredentials
 from src.core.deps import get_auth_service, get_current_user, oauth2_scheme
 from src.models.user import User
 from src.schemas.auth import (
+    LoginRequest,
     MessageResponse,
     OTPRequest,
     OTPVerify,
     RefreshRequest,
+    SignupRequest,
     TokenResponse,
     UserResponse,
 )
 from src.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(
+    body: LoginRequest,
+    auth: AuthService = Depends(get_auth_service),
+) -> TokenResponse:
+    """Email + password login, delegated to the Identity Service.
+
+    The returned token also works on LitPulse — it's the same Identity account.
+    """
+    from fastapi import HTTPException
+
+    from src.clients.identity_client import IdentityClientError, IdentityUpstreamError
+
+    try:
+        return await auth.login(body.email, body.password)
+    except IdentityUpstreamError as exc:
+        raise HTTPException(status_code=503, detail="Identity service unavailable") from exc
+    except IdentityClientError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=exc.detail) from exc
+
+
+@router.post("/signup", response_model=TokenResponse, status_code=201)
+async def signup(
+    body: SignupRequest,
+    auth: AuthService = Depends(get_auth_service),
+) -> TokenResponse:
+    """Email + password signup, delegated to the Identity Service."""
+    from fastapi import HTTPException
+
+    from src.clients.identity_client import IdentityClientError, IdentityUpstreamError
+
+    try:
+        return await auth.signup(body.email, body.password, body.full_name)
+    except IdentityUpstreamError as exc:
+        raise HTTPException(status_code=503, detail="Identity service unavailable") from exc
+    except IdentityClientError as exc:
+        raise HTTPException(status_code=exc.status_code or 400, detail=exc.detail) from exc
 
 
 @router.post("/request-otp", response_model=MessageResponse)

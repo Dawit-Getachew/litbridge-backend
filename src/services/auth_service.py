@@ -54,6 +54,52 @@ class AuthService:
             and self._identity is not None,
         )
 
+    # ── Email + password flow (delegated to Identity) ───────────
+
+    async def login(self, email: str, password: str) -> TokenResponse:
+        """Authenticate email + password via the Identity Service.
+
+        The SAME Identity credentials work on LitPulse and LitPortal; the
+        returned RS256 token validates on both. Password auth is only
+        available when Identity delegation is enabled (LitPortal has no local
+        password store of its own).
+        """
+        if not self._identity_enabled:
+            raise AuthenticationError(
+                "Password sign-in is unavailable (Identity Service not enabled).",
+            )
+        data = await self._identity.login(email, password)
+        return TokenResponse(
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            token_type=data.get("token_type", "bearer"),
+            expires_in=data.get("expires_in", self._settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60),
+        )
+
+    async def signup(self, email: str, password: str, full_name: str | None) -> TokenResponse:
+        """Create an account (email + password) via the Identity Service.
+
+        Mirrors LitPulse signup: the account lives in Identity, so the same
+        credentials immediately work on both apps. The local shadow ``User``
+        row is created lazily on the first authenticated request.
+        """
+        if not self._identity_enabled:
+            raise AuthenticationError(
+                "Password sign-up is unavailable (Identity Service not enabled).",
+            )
+        data = await self._identity.signup({
+            "email": email,
+            "password": password,
+            "signup_method": "password",
+            "full_name": full_name,
+        })
+        return TokenResponse(
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            token_type=data.get("token_type", "bearer"),
+            expires_in=data.get("expires_in", self._settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60),
+        )
+
     # ── OTP flow ─────────────────────────────────────────────────
 
     async def request_otp(self, email: str) -> None:
