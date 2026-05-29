@@ -44,6 +44,19 @@ class SignupRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=255)
 
 
+class VerifyCodeRequest(BaseModel):
+    """Body for POST /auth/verify-code (6-digit email verification code)."""
+
+    email: EmailStr
+    code: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ResendVerificationRequest(BaseModel):
+    """Body for POST /auth/resend-verification."""
+
+    email: EmailStr
+
+
 # ── Responses ────────────────────────────────────────────────────
 
 class TokenResponse(BaseModel):

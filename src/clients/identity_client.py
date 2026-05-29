@@ -150,6 +150,16 @@ class IdentityClient:
             "POST", "/api/v1/auth/verify-otp", json={"email": email, "code": code},
         )
 
+    async def verify_email_code(self, email: str, code: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/v1/auth/verify-code", json={"email": email, "code": code},
+        )
+
+    async def resend_verification(self, email: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/v1/auth/resend-verification", json={"email": email},
+        )
+
     async def refresh(self, refresh_token: str) -> dict[str, Any]:
         return await self._request(
             "POST", "/api/v1/auth/refresh", json={"refresh_token": refresh_token},

@@ -100,6 +100,22 @@ class AuthService:
             expires_in=data.get("expires_in", self._settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60),
         )
 
+    # ── Email verification (6-digit code, delegated to Identity) ──
+
+    async def verify_email_code(self, email: str, code: str) -> None:
+        """Confirm a password-signup email via the 6-digit code Identity emailed."""
+        if not self._identity_enabled:
+            raise AuthenticationError(
+                "Email verification is unavailable (Identity Service not enabled).",
+            )
+        await self._identity.verify_email_code(email, code)
+
+    async def resend_verification(self, email: str) -> None:
+        """Re-send the email verification code (best-effort; never leaks existence)."""
+        if not self._identity_enabled:
+            return
+        await self._identity.resend_verification(email)
+
     # ── OTP flow ─────────────────────────────────────────────────
 
     async def request_otp(self, email: str) -> None:

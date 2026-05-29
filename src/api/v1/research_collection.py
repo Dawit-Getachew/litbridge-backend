@@ -33,6 +33,7 @@ from src.schemas.research_collection import (
 )
 from src.services.paper_extraction_service import PaperExtractionService
 from src.services.research_collection_service import (
+    SHARED_LIBRARY_COLLECTION_ID,
     CollectionAccessDeniedError,
     CollectionNestingError,
     CollectionNotFoundError,
@@ -83,9 +84,17 @@ async def list_collections(
     user: User = Depends(get_current_user),
     service: ResearchCollectionService = Depends(get_research_collection_service),
 ) -> CollectionTreeResponse:
-    """Return tree of root collections with nested children and items."""
+    """Return tree of root collections with nested children and items.
 
-    return await service.list_collections(user.id)
+    When cross-app LitHub is enabled and the user is linked to Identity, a
+    read-only virtual "LitPulse Library" collection is appended so papers saved
+    in LitPulse appear here too. It is omitted silently otherwise.
+    """
+    tree = await service.list_collections(user.id)
+    shared = await service.build_shared_library_detail(getattr(user, "identity_id", None))
+    if shared is not None:
+        tree.collections.append(shared)
+    return tree
 
 
 @router.post("", response_model=CollectionResponse, status_code=201)
@@ -102,10 +111,29 @@ async def create_collection(
 @router.get("/{collection_id}", response_model=CollectionDetailResponse)
 async def get_collection(
     collection_id: UUID,
+    search: str | None = None,
+    design_type: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
     user: User = Depends(get_current_user),
     service: ResearchCollectionService = Depends(get_research_collection_service),
 ) -> CollectionDetailResponse:
-    """Get a research collection with its record items."""
+    """Get a research collection with its record items.
+
+    The reserved ``SHARED_LIBRARY_COLLECTION_ID`` is served read-through from
+    the central LitHub library rather than from Postgres.
+    """
+    if collection_id == SHARED_LIBRARY_COLLECTION_ID:
+        shared = await service.build_shared_library_detail(
+            getattr(user, "identity_id", None),
+            search=search,
+            design_type=design_type,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
+        if shared is None:
+            raise HTTPException(status_code=404, detail="Shared library is not available")
+        return shared
 
     try:
         return await service.get_collection(collection_id, user.id)

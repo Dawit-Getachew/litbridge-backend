@@ -13,9 +13,11 @@ from src.schemas.auth import (
     OTPRequest,
     OTPVerify,
     RefreshRequest,
+    ResendVerificationRequest,
     SignupRequest,
     TokenResponse,
     UserResponse,
+    VerifyCodeRequest,
 )
 from src.services.auth_service import AuthService
 
@@ -59,6 +61,35 @@ async def signup(
         raise HTTPException(status_code=503, detail="Identity service unavailable") from exc
     except IdentityClientError as exc:
         raise HTTPException(status_code=exc.status_code or 400, detail=exc.detail) from exc
+
+
+@router.post("/verify-code", response_model=MessageResponse)
+async def verify_code(
+    body: VerifyCodeRequest,
+    auth: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    """Verify a password-signup email with the 6-digit code Identity emailed."""
+    from fastapi import HTTPException
+
+    from src.clients.identity_client import IdentityClientError, IdentityUpstreamError
+
+    try:
+        await auth.verify_email_code(body.email, body.code)
+    except IdentityUpstreamError as exc:
+        raise HTTPException(status_code=503, detail="Identity service unavailable") from exc
+    except IdentityClientError as exc:
+        raise HTTPException(status_code=exc.status_code or 400, detail=exc.detail) from exc
+    return MessageResponse(message="Email verified.")
+
+
+@router.post("/resend-verification", response_model=MessageResponse)
+async def resend_verification(
+    body: ResendVerificationRequest,
+    auth: AuthService = Depends(get_auth_service),
+) -> MessageResponse:
+    """Re-send the 6-digit email verification code."""
+    await auth.resend_verification(body.email)
+    return MessageResponse(message="If an account exists, a verification code has been sent.")
 
 
 @router.post("/request-otp", response_model=MessageResponse)

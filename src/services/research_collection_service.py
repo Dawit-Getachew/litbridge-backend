@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import structlog
 
@@ -29,6 +30,32 @@ logger = structlog.get_logger(__name__)
 
 _MAX_NESTING_DEPTH = 2
 _DEFAULT_METADATA = PaperMetadata()
+
+# ── Virtual "LitPulse Library" collection ────────────────────────────────────
+# Papers saved in LitPulse (or from any app) live in the central LitHub library,
+# keyed by the user's Identity sub. They cannot be stored as real
+# research_collection_items (that table requires a non-null search_session_id FK
+# to a litbridge SearchSession, which a cross-app save does not have). So we
+# surface them as a single READ-ONLY synthetic collection whose items are mapped
+# from the LitHub library on the fly. These sentinel UUIDs are fixed and
+# reserved — they never collide with real (random) collection/search ids.
+SHARED_LIBRARY_COLLECTION_ID = UUID("00000000-0000-0000-0000-00000000115b")
+SHARED_LIBRARY_SEARCH_ID = UUID("00000000-0000-0000-0000-0000000005ea")
+_SHARED_LIBRARY_ITEM_NS = UUID("6f1b9c2e-0000-4000-8000-000000000001")
+SHARED_LIBRARY_NAME = "LitPulse Library"
+_SHARED_LIBRARY_FETCH_CAP = 200
+
+
+def _parse_saved_at(value: Any) -> datetime:
+    """Parse a LitHub ISO ``saved_at`` string; fall back to now (UTC)."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
 
 
 def _merge_lithub_metadata(metadata: PaperMetadata, paper: dict[str, Any]) -> PaperMetadata:
@@ -263,6 +290,92 @@ class ResearchCollectionService:
             self._collect_paper_ids(collection),
         )
         return self._to_detail(collection, counts, lithub_papers)
+
+    # -- Virtual "LitPulse Library" collection (read-through from LitHub) ------
+
+    def _lithub_article_to_item(self, art: dict[str, Any]) -> CollectionItemResponse:
+        """Map one central-LitHub article into a CollectionItemResponse.
+
+        The response schema is preserved exactly; ``id`` and ``record_id`` are
+        derived deterministically from the canonical identifier so the same
+        paper always maps to the same synthetic item id.
+        """
+        rid = str(
+            art.get("paper_id")
+            or art.get("pmid")
+            or art.get("doi")
+            or art.get("id")
+            or art.get("title")
+            or "",
+        )
+        item_id = uuid5(_SHARED_LIBRARY_ITEM_NS, rid or art.get("title", ""))
+        metadata = _merge_lithub_metadata(PaperMetadata(), art)
+        return CollectionItemResponse(
+            id=item_id,
+            collection_id=SHARED_LIBRARY_COLLECTION_ID,
+            record_id=rid or str(item_id),
+            search_session_id=SHARED_LIBRARY_SEARCH_ID,
+            title=art.get("title") or "Untitled paper",
+            notes=None,
+            metadata=metadata,
+            created_at=_parse_saved_at(art.get("saved_at")),
+        )
+
+    async def build_shared_library_detail(
+        self,
+        identity_sub: UUID | str | None,
+        *,
+        search: str | None = None,
+        design_type: str | None = None,
+        saved_after: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+    ) -> CollectionDetailResponse | None:
+        """Build the read-only virtual collection from the user's LitHub library.
+
+        Returns ``None`` (so the caller omits it) when cross-app LitHub is not
+        enabled, the user has no Identity link yet, or LitHub is unreachable —
+        the existing collections view is never broken by a LitHub hiccup.
+        """
+        if not self._lithub_enabled or identity_sub is None:
+            return None
+        try:
+            result = await self._lithub.internal_list_library(
+                identity_sub if isinstance(identity_sub, UUID) else UUID(str(identity_sub)),
+                params={
+                    "limit": _SHARED_LIBRARY_FETCH_CAP,
+                    "search": search,
+                    "design_type": design_type,
+                    "saved_after": saved_after,
+                    "sort_by": sort_by,
+                    "sort_dir": sort_dir,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — read-through is best-effort
+            logger.warning("shared_library_read_failed", error=str(exc))
+            return None
+
+        articles = result.get("articles", []) or []
+        items = [self._lithub_article_to_item(a) for a in articles if isinstance(a, dict)]
+        total = int(result.get("total", len(items)) or 0)
+        now = datetime.now(timezone.utc)
+        return CollectionDetailResponse(
+            id=SHARED_LIBRARY_COLLECTION_ID,
+            name=SHARED_LIBRARY_NAME,
+            description="Papers saved from LitPulse and across Scienthesis (read-only).",
+            parent_id=None,
+            icon="sparkles",
+            color="#7c3aed",
+            position=9999,  # sort last in the tree
+            item_count=total,
+            children_count=0,
+            total_item_count=total,
+            created_at=now,
+            updated_at=now,
+            items=items,
+            all_items=items,
+            children=[],
+        )
 
     async def update_collection(
         self,
