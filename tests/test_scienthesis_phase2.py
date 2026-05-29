@@ -261,6 +261,68 @@ async def test_service_enrichment_best_effort_on_lithub_error():
     assert papers == {}  # swallowed; caller falls back to local metadata
 
 
+# ── Regression: LitHub sync extracts identifiers from a real SearchSession ──
+
+
+async def test_extract_paper_identifiers_against_real_search_session():
+    """The background sync must pull PMID/DOI from a real SearchSession.
+
+    This exercises the exact path that silently failed in production — the
+    background sync called a non-existent repo method (get_by_id), so no paper
+    ever reached LitHub. Uses a real SearchRepository + SearchSession row.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from src.api.v1.research_collection import _extract_paper_identifiers
+    from src.models import Base, SearchSession, User
+    from src.repositories.search_repo import SearchRepository
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: Base.metadata.create_all(c, tables=[User.__table__, SearchSession.__table__]),
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        sess = SearchSession(
+            user_id=None,
+            query="renal failure",
+            query_type="free",
+            search_mode="quick",
+            sources=["pubmed"],
+            status="completed",
+            results=[
+                {
+                    "id": "rec-1", "pmid": "38000123", "doi": "10.1001/abc",
+                    "title": "Renal outcomes", "abstract": "An abstract.",
+                    "journal": "NEJM", "year": 2024, "authors": ["A Author"],
+                    "study_design": "rct",
+                },
+                {"id": "rec-2", "pmid": None, "doi": None, "title": "No ids"},
+            ],
+        )
+        session.add(sess)
+        await session.commit()
+        await session.refresh(sess)
+
+        repo = SearchRepository(db=session)
+
+        result = await _extract_paper_identifiers(repo, sess.id, "rec-1")
+        assert result is not None
+        assert result["pmid"] == "38000123"
+        assert result["doi"] == "10.1001/abc"
+        assert result["title"] == "Renal outcomes"
+        assert result["authors"] == ["A Author"]
+        assert result["study_design"] == "rct"
+
+        # Record present but no identifiers → None (skipped, not crashed).
+        assert await _extract_paper_identifiers(repo, sess.id, "rec-2") is None
+        # Unknown record id → None.
+        assert await _extract_paper_identifiers(repo, sess.id, "rec-missing") is None
+
+    await engine.dispose()
+
+
 # ── lithub_client internal_save_paper uses the dedicated endpoint ───
 
 

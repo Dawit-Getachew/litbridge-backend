@@ -258,36 +258,37 @@ async def _run_lithub_sync_background(
             sync = _SyncSvc(lithub=lithub, outbox=outbox)
 
             for item in item_dicts:
-                record_id = item["record_id"]
-                search_session_id = UUID(item["search_session_id"])
-                paper_record = await _extract_paper_identifiers(
-                    search_repo, search_session_id, record_id,
-                )
-                if paper_record is None:
-                    logger.warning(
-                        "lithub_sync_record_not_found",
-                        record_id=record_id,
-                        search_session_id=str(search_session_id),
+                # One bad record must never abort the whole batch — wrap each.
+                try:
+                    record_id = item["record_id"]
+                    search_session_id = UUID(item["search_session_id"])
+                    paper_record = await _extract_paper_identifiers(
+                        search_repo, search_session_id, record_id,
                     )
-                    continue
-                save_body = {
-                    **paper_record,
-                    "source": "litportal-collection",
-                    "folder": "Inbox",
-                    "title": item.get("title") or paper_record.get("title") or "Untitled paper",
-                }
-                ok, response = await sync.save_paper(UUID(identity_user_id), save_body)
-                if ok and response and response.get("paper_id"):
-                    try:
+                    if paper_record is None:
+                        logger.warning(
+                            "lithub_sync_record_not_found",
+                            record_id=record_id,
+                            search_session_id=str(search_session_id),
+                        )
+                        continue
+                    save_body = {
+                        **paper_record,
+                        "source": "litportal-collection",
+                        "folder": "Inbox",
+                        "title": item.get("title") or paper_record.get("title") or "Untitled paper",
+                    }
+                    ok, response = await sync.save_paper(UUID(identity_user_id), save_body)
+                    if ok and response and response.get("paper_id"):
                         await collection_repo.set_item_paper_id(
                             UUID(item["item_id"]), UUID(str(response["paper_id"])),
                         )
-                    except Exception as exc:  # noqa: BLE001 — link is best-effort
-                        logger.warning(
-                            "lithub_sync_paper_id_persist_failed",
-                            item_id=item["item_id"],
-                            error=str(exc),
-                        )
+                except Exception as exc:  # noqa: BLE001 — per-item best-effort
+                    logger.warning(
+                        "lithub_sync_item_failed",
+                        item=item.get("record_id"),
+                        error=str(exc),
+                    )
 
 
 async def _extract_paper_identifiers(
@@ -296,7 +297,8 @@ async def _extract_paper_identifiers(
     record_id: str,
 ) -> dict[str, Any] | None:
     """Pull the canonical paper identifiers out of a SearchSession result row."""
-    session_row = await search_repo.get_by_id(search_session_id)
+    # SearchRepository exposes get_session(<uuid-string>), not get_by_id.
+    session_row = await search_repo.get_session(str(search_session_id))
     if session_row is None or not session_row.results:
         return None
     for record in session_row.results:
