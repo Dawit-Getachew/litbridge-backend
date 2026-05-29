@@ -1,5 +1,6 @@
 """FastAPI application entrypoint for LitBridge."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -32,6 +33,40 @@ from src.core.redis import create_redis_pool
 
 logger = structlog.get_logger(__name__)
 
+_OUTBOX_SWEEP_INTERVAL_SECONDS = 60
+
+
+async def _lithub_outbox_sweeper(app: FastAPI) -> None:
+    """Periodically retry failed LitHub library writes from the outbox.
+
+    Runs only while ``LITPORTAL_DUAL_WRITE_LITHUB`` + ``LITHUB_BASE_URL`` are
+    configured. A transient LitHub outage queues saves in
+    ``lithub_sync_outbox``; this loop drains them with exponential backoff so
+    no cross-app save is ever permanently lost.
+    """
+    settings = get_settings()
+    while True:
+        try:
+            await asyncio.sleep(_OUTBOX_SWEEP_INTERVAL_SECONDS)
+            if not (settings.LITPORTAL_DUAL_WRITE_LITHUB and settings.LITHUB_BASE_URL):
+                continue
+            from src.clients.lithub_client import LitHubClient
+            from src.repositories.lithub_sync_repo import LitHubSyncRepository
+            from src.services.lithub_sync_service import LitHubSyncService
+
+            async with app.state.db_session_factory() as session:
+                lithub = LitHubClient(http_client=app.state.http_client, settings=settings)
+                sync = LitHubSyncService(
+                    lithub=lithub, outbox=LitHubSyncRepository(db=session),
+                )
+                sent = await sync.drain_outbox()
+                if sent:
+                    logger.info("lithub_outbox_drained", sent=sent)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:  # noqa: BLE001 — sweeper must never crash the loop
+            logger.warning("lithub_outbox_sweeper_error", error=str(exc))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -46,11 +81,18 @@ async def lifespan(app: FastAPI):
     app.state.db_session_factory = db_session_factory
     app.state.redis = redis_client
     app.state.http_client = http_client
+
+    sweeper_task = asyncio.create_task(_lithub_outbox_sweeper(app))
     logger.info("startup_complete")
 
     try:
         yield
     finally:
+        sweeper_task.cancel()
+        try:
+            await sweeper_task
+        except asyncio.CancelledError:
+            pass
         await http_client.aclose()
         await redis_client.aclose()
         await engine.dispose()

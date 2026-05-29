@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
@@ -21,10 +22,42 @@ from src.schemas.research_collection import (
     UpdateCollectionRequest,
 )
 
+if TYPE_CHECKING:
+    from src.clients.lithub_client import LitHubClient
+
 logger = structlog.get_logger(__name__)
 
 _MAX_NESTING_DEPTH = 2
 _DEFAULT_METADATA = PaperMetadata()
+
+
+def _merge_lithub_metadata(metadata: PaperMetadata, paper: dict[str, Any]) -> PaperMetadata:
+    """Fill still-empty PaperMetadata fields from a canonical LitHub paper.
+
+    Local LLM-extracted metadata always wins; LitHub only backfills fields that
+    are still at their default so the cross-app view is non-empty even before
+    LLM extraction has run. The PaperMetadata shape is preserved exactly.
+    """
+    data = metadata.model_dump()
+    changed = False
+    if not data.get("study_design") and paper.get("study_design"):
+        data["study_design"] = paper["study_design"]
+        changed = True
+    if data.get("key_findings", "Not reported") in (None, "", "Not reported") and paper.get("ai_summary"):
+        data["key_findings"] = str(paper["ai_summary"])[:2000]
+        changed = True
+    if data.get("study_details", "Not reported") in (None, "", "Not reported"):
+        bits = [paper.get("journal"), paper.get("pub_date")]
+        joined = " · ".join(str(b) for b in bits if b)
+        if joined:
+            data["study_details"] = joined
+            changed = True
+    if not changed:
+        return metadata
+    try:
+        return PaperMetadata.model_validate(data)
+    except Exception:
+        return metadata
 
 
 class CollectionNotFoundError(LitBridgeError):
@@ -43,8 +76,15 @@ class CollectionNestingError(LitBridgeError):
 
 
 class ResearchCollectionService:
-    def __init__(self, repo: ResearchCollectionRepository) -> None:
+    def __init__(
+        self,
+        repo: ResearchCollectionRepository,
+        lithub_client: "LitHubClient | None" = None,
+        lithub_enabled: bool = False,
+    ) -> None:
         self.repo = repo
+        self._lithub = lithub_client
+        self._lithub_enabled = lithub_enabled and lithub_client is not None
 
     # -- Helpers --------------------------------------------------------------
 
@@ -59,12 +99,46 @@ class ResearchCollectionService:
         return collection
 
     @staticmethod
-    def _item_to_response(item: ResearchCollectionItem) -> CollectionItemResponse:
+    def _collect_paper_ids(collection: ResearchCollection) -> list[UUID]:
+        """Gather LitHub paper_ids from a collection and its children's items."""
+        ids: list[UUID] = []
+        for it in (collection.items or []):
+            if getattr(it, "paper_id", None) is not None:
+                ids.append(it.paper_id)
+        for child in (collection.children or []):
+            for it in (child.items or []):
+                if getattr(it, "paper_id", None) is not None:
+                    ids.append(it.paper_id)
+        return ids
+
+    async def _fetch_lithub_papers(
+        self, paper_ids: list[UUID],
+    ) -> dict[str, dict[str, Any]]:
+        """Best-effort bulk fetch of LitHub paper metadata keyed by paper_id str."""
+        if not self._lithub_enabled or not paper_ids:
+            return {}
+        try:
+            papers = await self._lithub.internal_papers_bulk(list(set(paper_ids)))
+        except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+            logger.warning("lithub_enrichment_fetch_failed", error=str(exc))
+            return {}
+        return {str(p["paper_id"]): p for p in papers if p.get("paper_id")}
+
+    def _item_to_response(
+        self,
+        item: ResearchCollectionItem,
+        lithub_papers: dict[str, dict[str, Any]] | None = None,
+    ) -> CollectionItemResponse:
         raw_meta = item.metadata_extracted
         try:
             metadata = PaperMetadata.model_validate(raw_meta) if raw_meta else _DEFAULT_METADATA
         except Exception:
             metadata = _DEFAULT_METADATA
+        # Backfill still-empty fields from the canonical LitHub paper (best-effort).
+        if lithub_papers and getattr(item, "paper_id", None) is not None:
+            paper = lithub_papers.get(str(item.paper_id))
+            if paper:
+                metadata = _merge_lithub_metadata(metadata, paper)
         return CollectionItemResponse(
             id=item.id,
             collection_id=item.collection_id,
@@ -102,8 +176,11 @@ class ResearchCollectionService:
         self,
         collection: ResearchCollection,
         counts: dict[UUID, int],
+        lithub_papers: dict[str, dict[str, Any]] | None = None,
     ) -> CollectionDetailResponse:
-        own_items = [self._item_to_response(it) for it in (collection.items or [])]
+        own_items = [
+            self._item_to_response(it, lithub_papers) for it in (collection.items or [])
+        ]
 
         children_items: list[CollectionItemResponse] = []
         children_responses: list[CollectionResponse] = []
@@ -116,7 +193,7 @@ class ResearchCollectionService:
                 total_item_count=child_count,
             ))
             children_items.extend(
-                self._item_to_response(it) for it in (child.items or [])
+                self._item_to_response(it, lithub_papers) for it in (child.items or [])
             )
 
         own_count = counts.get(collection.id, 0)
@@ -146,8 +223,12 @@ class ResearchCollectionService:
         """Return tree of root collections with children nested."""
         roots = await self.repo.get_root_collections(user_id)
         counts = await self.repo.count_items_per_collection(user_id)
+        all_paper_ids: list[UUID] = []
+        for c in roots:
+            all_paper_ids.extend(self._collect_paper_ids(c))
+        lithub_papers = await self._fetch_lithub_papers(all_paper_ids)
         return CollectionTreeResponse(
-            collections=[self._to_detail(c, counts) for c in roots],
+            collections=[self._to_detail(c, counts, lithub_papers) for c in roots],
         )
 
     async def create_collection(
@@ -178,7 +259,10 @@ class ResearchCollectionService:
         if collection.user_id != user_id:
             raise CollectionAccessDeniedError()
         counts = await self.repo.count_items_per_collection(user_id)
-        return self._to_detail(collection, counts)
+        lithub_papers = await self._fetch_lithub_papers(
+            self._collect_paper_ids(collection),
+        )
+        return self._to_detail(collection, counts, lithub_papers)
 
     async def update_collection(
         self,

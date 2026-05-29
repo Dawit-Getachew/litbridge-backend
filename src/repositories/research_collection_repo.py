@@ -265,3 +265,13 @@ class ResearchCollectionRepository:
             ResearchCollectionItem.id == item_id,
         )
         return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def set_item_paper_id(self, item_id: UUID, paper_id: UUID) -> None:
+        """Persist the canonical LitHub paper UUID on a collection item."""
+        stmt = (
+            update(ResearchCollectionItem)
+            .where(ResearchCollectionItem.id == item_id)
+            .values(paper_id=paper_id)
+        )
+        await self.db.execute(stmt)
+        await self.db.commit()

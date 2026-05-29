@@ -9,6 +9,7 @@ import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from src.ai.llm_client import LLMClient
+from src.core.config import get_settings
 from src.core.deps import (
     get_current_user,
     get_llm_client,
@@ -159,7 +160,12 @@ async def add_records(
 ) -> list[CollectionItemResponse]:
     """Add one or more records to a research collection.
 
-    AI metadata extraction runs in the background with its own DB session.
+    AI metadata extraction runs in the background with its own DB session. When
+    ``LITPORTAL_DUAL_WRITE_LITHUB`` is enabled, each record is ALSO written to
+    the central LitHub library so the user sees the paper in LitPulse's
+    ``/api/library`` listing as well. The LitHub write happens out-of-band
+    (background task + outbox-with-retry) so the user-facing response shape
+    and latency are unchanged regardless of LitHub availability.
     """
     try:
         items = await service.add_records(collection_id, user.id, payload)
@@ -184,7 +190,148 @@ async def add_records(
             request.app.state.redis,
         )
 
+    settings = get_settings()
+    if settings.LITPORTAL_DUAL_WRITE_LITHUB and items:
+        # The central LitHub library is keyed by the user's Identity ``sub``
+        # (NOT the litbridge-local user id) so a paper saved here matches what
+        # LitPulse reads for the same user. ``identity_id`` is stamped on the
+        # shadow row by get_current_user on the first Identity-authenticated
+        # request, so it is present here. If it is missing (Identity disabled
+        # or a pre-migration native user), skip the LitHub mirror.
+        identity_sub = getattr(user, "identity_id", None)
+        if identity_sub is not None:
+            background_tasks.add_task(
+                _run_lithub_sync_background,
+                str(identity_sub),
+                [
+                    {
+                        "item_id": str(item.id),
+                        "record_id": item.record_id,
+                        "title": item.title,
+                        "search_session_id": str(item.search_session_id),
+                    }
+                    for item in items
+                ],
+                request.app.state.db_session_factory,
+            )
+        else:
+            logger.warning(
+                "lithub_sync_skipped_no_identity_id",
+                user_id=str(user.id),
+            )
+
     return items
+
+
+async def _run_lithub_sync_background(
+    identity_user_id: str,
+    item_dicts: list[dict[str, Any]],
+    session_factory: Any,
+) -> None:
+    """Fan out post-commit LitHub writes for the freshly-added records.
+
+    For each item, we look up the SearchSession's serialized ``results`` to
+    find the UnifiedRecord with the matching ``record_id``, extract its PMID
+    and DOI, and call LitHub's save endpoint via :class:`LitHubSyncService`
+    keyed by the user's Identity ``sub``. On success the returned LitHub
+    ``paper_id`` is persisted onto the collection item so collection listing
+    can enrich from LitHub. LitHub failures are absorbed by the outbox.
+    """
+    from src.clients.lithub_client import LitHubClient
+    from src.repositories.lithub_sync_repo import LitHubSyncRepository
+    from src.repositories.research_collection_repo import ResearchCollectionRepository
+    from src.repositories.search_repo import SearchRepository as _SearchRepo
+    from src.services.lithub_sync_service import LitHubSyncService as _SyncSvc
+
+    settings = get_settings()
+    if not settings.LITPORTAL_DUAL_WRITE_LITHUB or not settings.LITHUB_BASE_URL:
+        return
+
+    import httpx
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
+        async with session_factory() as session:
+            search_repo = _SearchRepo(db=session)
+            outbox = LitHubSyncRepository(db=session)
+            collection_repo = ResearchCollectionRepository(db=session)
+            lithub = LitHubClient(http_client=client, settings=settings)
+            sync = _SyncSvc(lithub=lithub, outbox=outbox)
+
+            for item in item_dicts:
+                record_id = item["record_id"]
+                search_session_id = UUID(item["search_session_id"])
+                paper_record = await _extract_paper_identifiers(
+                    search_repo, search_session_id, record_id,
+                )
+                if paper_record is None:
+                    logger.warning(
+                        "lithub_sync_record_not_found",
+                        record_id=record_id,
+                        search_session_id=str(search_session_id),
+                    )
+                    continue
+                save_body = {
+                    **paper_record,
+                    "source": "litportal-collection",
+                    "folder": "Inbox",
+                    "title": item.get("title") or paper_record.get("title") or "Untitled paper",
+                }
+                ok, response = await sync.save_paper(UUID(identity_user_id), save_body)
+                if ok and response and response.get("paper_id"):
+                    try:
+                        await collection_repo.set_item_paper_id(
+                            UUID(item["item_id"]), UUID(str(response["paper_id"])),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — link is best-effort
+                        logger.warning(
+                            "lithub_sync_paper_id_persist_failed",
+                            item_id=item["item_id"],
+                            error=str(exc),
+                        )
+
+
+async def _extract_paper_identifiers(
+    search_repo: SearchRepository,
+    search_session_id: UUID,
+    record_id: str,
+) -> dict[str, Any] | None:
+    """Pull the canonical paper identifiers out of a SearchSession result row."""
+    session_row = await search_repo.get_by_id(search_session_id)
+    if session_row is None or not session_row.results:
+        return None
+    for record in session_row.results:
+        if not isinstance(record, dict):
+            continue
+        if record.get("id") != record_id:
+            continue
+        result: dict[str, Any] = {}
+        if record.get("pmid"):
+            result["pmid"] = str(record["pmid"])
+        if record.get("doi"):
+            result["doi"] = str(record["doi"])
+        if not result:
+            return None
+        for k in ("title", "abstract", "journal", "ai_summary"):
+            if record.get(k):
+                result[k] = record[k]
+        if record.get("year"):
+            result["year"] = record["year"]
+        if record.get("pub_date"):
+            result["pub_date"] = record["pub_date"]
+        authors = record.get("authors")
+        if isinstance(authors, list):
+            result["authors"] = authors
+        elif isinstance(authors, str) and authors:
+            result["authors"] = [authors]
+        study_design = record.get("study_design")
+        if study_design:
+            result["study_design"] = study_design
+        if record.get("portal_engine_record_id"):
+            result["portal_engine_record_id"] = record["portal_engine_record_id"]
+        else:
+            result["portal_engine_record_id"] = record_id
+        return result
+    return None
 
 
 @router.delete("/{collection_id}/records/{record_id}", status_code=204)

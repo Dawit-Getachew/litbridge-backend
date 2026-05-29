@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from fastapi.security import HTTPAuthorizationCredentials
 
-from src.core.deps import get_auth_service, get_current_user
+from src.core.deps import get_auth_service, get_current_user, oauth2_scheme
 from src.models.user import User
 from src.schemas.auth import (
     MessageResponse,
@@ -51,10 +52,11 @@ async def refresh_token(
 async def logout(
     body: RefreshRequest,
     _user: User = Depends(get_current_user),
+    creds: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
     auth: AuthService = Depends(get_auth_service),
 ) -> MessageResponse:
     """Revoke the provided refresh token."""
-    await auth.logout(body.refresh_token)
+    await auth.logout(body.refresh_token, access_token=creds.credentials)
     return MessageResponse(message="Logged out successfully.")
 
 

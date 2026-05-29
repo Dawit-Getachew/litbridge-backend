@@ -77,6 +77,52 @@ class UserRepository:
         await self.db.refresh(user)
         return user
 
+    async def get_by_identity_id(self, identity_id: UUID) -> User | None:
+        from sqlalchemy import select as _select
+
+        stmt = _select(User).where(User.identity_id == identity_id)
+        return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def upsert_identity_user(
+        self, identity_id: UUID, email: str,
+    ) -> User:
+        """Resolve or provision a Portal-Engine user from an Identity JWT.
+
+        Lookup precedence:
+          1. By `identity_id` — fastest path for repeat calls.
+          2. By `email` — links an existing native-OTP or LitPulse user to
+             their Identity row by stamping `identity_id` on the shadow row.
+          3. Otherwise create a new shadow user with `auth_provider="identity"`.
+
+        The created/linked user is always marked verified because Identity is
+        the upstream issuer.
+        """
+        user = await self.get_by_identity_id(identity_id)
+        if user is not None:
+            return user
+
+        normalized_email = email.strip().lower() if email else ""
+        if normalized_email:
+            user = await self.get_by_email(normalized_email)
+            if user is not None:
+                user.identity_id = identity_id
+                if not user.is_verified:
+                    user.is_verified = True
+                await self.db.commit()
+                await self.db.refresh(user)
+                return user
+
+        user = User(
+            email=normalized_email or f"unknown+{identity_id}@scienthesis.local",
+            auth_provider="identity",
+            is_verified=True,
+            identity_id=identity_id,
+        )
+        self.db.add(user)
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
+
     async def update_last_login(self, user_id: UUID, now: datetime) -> None:
         stmt = update(User).where(User.id == user_id).values(last_login_at=now)
         await self.db.execute(stmt)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import redis.asyncio as redis
@@ -21,6 +22,9 @@ from src.repositories.user_repo import UserRepository
 from src.schemas.auth import TokenResponse
 from src.services.email_service import EmailService
 
+if TYPE_CHECKING:
+    from src.clients.identity_client import IdentityClient
+
 logger = structlog.get_logger(__name__)
 
 
@@ -33,16 +37,36 @@ class AuthService:
         email_service: EmailService,
         redis_client: redis.Redis,
         settings: Settings,
+        identity_client: "IdentityClient | None" = None,
     ) -> None:
         self._repo = user_repo
         self._email = email_service
         self._redis = redis_client
         self._settings = settings
+        self._identity = identity_client
+
+    @property
+    def _identity_enabled(self) -> bool:
+        """True when auth should be delegated to the Scienthesis Identity Service."""
+        return bool(
+            self._settings.LITPORTAL_USE_IDENTITY
+            and self._settings.IDENTITY_BASE_URL
+            and self._identity is not None,
+        )
 
     # ── OTP flow ─────────────────────────────────────────────────
 
     async def request_otp(self, email: str) -> None:
-        """Generate an OTP, store it in Redis, and email it to the user."""
+        """Generate an OTP, store it in Redis, and email it to the user.
+
+        When Identity delegation is enabled, the OTP is issued and emailed by
+        the Scienthesis Identity Service (single source of truth for users).
+        """
+        if self._identity_enabled:
+            await self._identity.request_otp(email)
+            logger.info("otp_requested_via_identity", email=email)
+            return
+
         rate_key = f"otp_rate:{email}"
         sends = await self._redis.get(rate_key)
         if sends is not None and int(sends) >= 5:
@@ -66,7 +90,25 @@ class AuthService:
         logger.info("otp_requested", email=email)
 
     async def verify_otp(self, email: str, code: str) -> TokenResponse:
-        """Validate an OTP code and return access + refresh tokens."""
+        """Validate an OTP code and return access + refresh tokens.
+
+        When Identity delegation is enabled, verification + token issuance is
+        performed by the Identity Service and its RS256 token pair is returned
+        verbatim (same ``TokenResponse`` shape). The local shadow ``User`` row
+        is created lazily on the next authenticated request via
+        ``get_current_user`` → ``upsert_identity_user``.
+        """
+        if self._identity_enabled:
+            data = await self._identity.verify_otp(email, code)
+            return TokenResponse(
+                access_token=data["access_token"],
+                refresh_token=data["refresh_token"],
+                token_type=data.get("token_type", "bearer"),
+                expires_in=data.get(
+                    "expires_in", self._settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                ),
+            )
+
         otp_key = f"otp:{email}"
         raw = await self._redis.get(otp_key)
         if raw is None:
@@ -104,6 +146,17 @@ class AuthService:
 
     async def refresh_tokens(self, raw_refresh_token: str) -> TokenResponse:
         """Exchange a valid refresh token for a new token pair."""
+        if self._identity_enabled:
+            data = await self._identity.refresh(raw_refresh_token)
+            return TokenResponse(
+                access_token=data["access_token"],
+                refresh_token=data["refresh_token"],
+                token_type=data.get("token_type", "bearer"),
+                expires_in=data.get(
+                    "expires_in", self._settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                ),
+            )
+
         token_hash = hash_token(raw_refresh_token)
         stored = await self._repo.get_refresh_token(token_hash)
 
@@ -120,8 +173,20 @@ class AuthService:
         await self._repo.revoke_refresh_token(token_hash)
         return await self._issue_tokens(user.id, user.email, user.auth_provider)
 
-    async def logout(self, raw_refresh_token: str) -> None:
-        """Revoke the given refresh token."""
+    async def logout(self, raw_refresh_token: str, access_token: str | None = None) -> None:
+        """Revoke the given refresh token.
+
+        Under Identity delegation the refresh token is an Identity-issued
+        opaque token, so revocation is delegated to Identity (best-effort —
+        a transient Identity outage must not block logout).
+        """
+        if self._identity_enabled:
+            try:
+                await self._identity.logout(raw_refresh_token, access_token or "")
+            except Exception as exc:  # noqa: BLE001  — logout is best-effort
+                logger.warning("identity_logout_failed", error=str(exc))
+            return
+
         token_hash = hash_token(raw_refresh_token)
         await self._repo.revoke_refresh_token(token_hash)
         logger.info("user_logged_out")

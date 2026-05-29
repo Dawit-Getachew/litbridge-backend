@@ -82,6 +82,12 @@ class ResearchCollectionItem(Base):
     metadata_extracted: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None,
     )
+    # The canonical LitHub paper UUID returned when this record was mirrored
+    # into the central library (Scienthesis Phase 2). Lets collection listing
+    # enrich items with LitHub metadata and keeps the cross-service link.
+    paper_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True,
+    )
 
     collection: Mapped[ResearchCollection] = relationship(
         "ResearchCollection", back_populates="items",

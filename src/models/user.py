@@ -35,6 +35,14 @@ class User(Base):
     litpulse_user_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, unique=True, index=True,
     )
+    # Set when this user is provisioned via the Scienthesis Identity Service
+    # (Phase 2 of the merger). Stores Identity's user UUID so we can resolve
+    # the local shadow row in O(1) on subsequent requests. Both legacy fields
+    # remain populated during the cutover window; the LitPulse JWT bridge is
+    # removed once `LITPORTAL_USE_IDENTITY` has been on for 90 days.
+    identity_id: Mapped["PyUUID | None"] = mapped_column(
+        UUID(as_uuid=True), nullable=True, unique=True, index=True,
+    )
 
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(
         back_populates="user", cascade="all, delete-orphan", lazy="selectin",

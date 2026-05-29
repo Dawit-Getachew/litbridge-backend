@@ -47,6 +47,24 @@ class Settings(BaseSettings):
     LITPULSE_JWT_SECRET_KEY: str = ""
     LITPULSE_JWT_ENABLED: bool = False
 
+    # Scienthesis Identity Service integration. Phase 2 of the merger replaces
+    # the LITPULSE_JWT_* bridge with a unified RS256 Identity Service. Both
+    # flags default off so this commit is a no-op until ops flips them.
+    IDENTITY_BASE_URL: str = ""
+    IDENTITY_JWKS_URL: str = ""
+    IDENTITY_JWT_ISSUER: str = "scienthesis-identity"
+    IDENTITY_JWT_AUDIENCE: str = "litportal"
+    JWKS_CACHE_TTL_SECONDS: int = 300
+    LITPORTAL_USE_IDENTITY: bool = False
+
+    # Scienthesis LitHub central library integration.
+    LITHUB_BASE_URL: str = ""
+    LITPORTAL_DUAL_WRITE_LITHUB: bool = False
+
+    # Service-to-service auth. The same secret is shared with Identity and
+    # LitHub so this BFF can call /api/v1/internal/* endpoints.
+    SERVICE_TOKEN_SECRET: str = ""
+
     # Cross-source ranking knobs (Phase 2 — weighted Reciprocal Rank Fusion).
     # Defaults are deliberately conservative; safe to deploy without env edits.
     # See `src/services/dedup_service.py` for the formulas these feed into.

@@ -257,11 +257,24 @@ async def get_research_collection_repo(
 
 
 async def get_research_collection_service(
+    request: Request,
     repo: ResearchCollectionRepository = Depends(get_research_collection_repo),
 ) -> ResearchCollectionService:
-    """Return the research collections service."""
+    """Return the research collections service.
 
-    return ResearchCollectionService(repo=repo)
+    Injects a LitHub client when configured so collection listings can enrich
+    item metadata from the central library (best-effort, gated).
+    """
+    settings = get_settings()
+    lithub_client = None
+    lithub_enabled = bool(settings.LITHUB_BASE_URL) and settings.LITPORTAL_DUAL_WRITE_LITHUB
+    if lithub_enabled:
+        lithub_client = get_lithub_client(request)
+    return ResearchCollectionService(
+        repo=repo,
+        lithub_client=lithub_client,
+        lithub_enabled=lithub_enabled,
+    )
 
 
 async def get_paper_extraction_service(
@@ -277,6 +290,40 @@ async def get_paper_extraction_service(
         repo=repo,
         search_repo=search_repo,
     )
+
+
+# ── Scienthesis platform clients ─────────────────────────────────
+
+
+def get_lithub_client(request: Request) -> "LitHubClient":
+    """Return a request-scoped LitHub HTTP client."""
+    from src.clients.lithub_client import LitHubClient
+
+    return LitHubClient(http_client=get_http_client(request), settings=get_settings())
+
+
+def get_identity_client(request: Request) -> "IdentityClient":
+    """Return a request-scoped Identity HTTP client."""
+    from src.clients.identity_client import IdentityClient
+
+    return IdentityClient(http_client=get_http_client(request), settings=get_settings())
+
+
+async def get_lithub_sync_repo(
+    db: AsyncSession = Depends(get_db),
+) -> "LitHubSyncRepository":
+    from src.repositories.lithub_sync_repo import LitHubSyncRepository
+
+    return LitHubSyncRepository(db=db)
+
+
+async def get_lithub_sync_service(
+    request: Request,
+    outbox: "LitHubSyncRepository" = Depends(get_lithub_sync_repo),
+) -> "LitHubSyncService":
+    from src.services.lithub_sync_service import LitHubSyncService
+
+    return LitHubSyncService(lithub=get_lithub_client(request), outbox=outbox)
 
 
 # ── Auth dependencies ────────────────────────────────────────────
@@ -300,13 +347,22 @@ async def get_auth_service(
     request: Request,
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> AuthService:
-    """Return the authentication orchestrator."""
+    """Return the authentication orchestrator.
+
+    Injects an IdentityClient when ``LITPORTAL_USE_IDENTITY`` is enabled so the
+    OTP/refresh/logout flows delegate to the Scienthesis Identity Service.
+    """
+    settings = get_settings()
+    identity_client = None
+    if settings.LITPORTAL_USE_IDENTITY and settings.IDENTITY_BASE_URL:
+        identity_client = get_identity_client(request)
 
     return AuthService(
         user_repo=user_repo,
         email_service=get_email_service(request),
         redis_client=get_redis(request),
-        settings=get_settings(),
+        settings=settings,
+        identity_client=identity_client,
     )
 
 
@@ -354,25 +410,76 @@ async def _resolve_litpulse_token(
     return user if user.is_active else None
 
 
+async def _resolve_identity_token(
+    raw_token: str,
+    user_repo: UserRepository,
+    settings: Settings,
+    http_client: httpx.AsyncClient,
+) -> User | None:
+    """Try to validate `raw_token` as a Scienthesis Identity-issued JWT.
+
+    Returns the upserted shadow `User` on success, ``None`` when the token
+    isn't Identity-shaped (so the caller can fall through to the next path).
+    Raises :class:`AuthenticationError` for tokens that ARE Identity-shaped
+    but invalid (expired, signature mismatch) — we never silently downgrade
+    a valid-but-failed Identity token to another validator.
+    """
+    if not settings.LITPORTAL_USE_IDENTITY or not settings.IDENTITY_BASE_URL:
+        return None
+    from src.clients.identity_client import validate_identity_access_token
+
+    try:
+        payload = await validate_identity_access_token(
+            raw_token, http_client=http_client, settings=settings,
+        )
+    except jwt.InvalidTokenError as exc:
+        raise AuthenticationError(f"Invalid Identity access token: {exc}") from exc
+    if payload is None:
+        return None
+
+    sub = payload.get("sub")
+    email = payload.get("email")
+    if not sub:
+        raise AuthenticationError("Identity token missing 'sub' claim.")
+    try:
+        identity_uuid = UUID(str(sub))
+    except (TypeError, ValueError) as exc:
+        raise AuthenticationError("Identity token 'sub' is not a UUID.") from exc
+
+    user = await user_repo.upsert_identity_user(
+        identity_id=identity_uuid,
+        email=str(email or ""),
+    )
+    return user if user.is_active else None
+
+
 async def get_current_user(
+    request: Request = None,  # noqa: RUF013 — FastAPI injects Request; the default lets unit tests omit it
     token: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> User:
     """Decode JWT and load the authenticated user, or raise 401.
 
-    Two validator paths:
-      1. Native Portal Engine OTP-issued token (HS256, secret = SECRET_KEY).
-      2. LitPulse-issued token (HS256, secret = LITPULSE_JWT_SECRET_KEY) when
-         LITPULSE_JWT_ENABLED. On first contact the user is upserted by
-         (litpulse_user_id, email).
+    Validator paths, tried in order:
+      1. Native Portal Engine OTP-issued token (HS256, secret = ``SECRET_KEY``).
+      2. Identity Service-issued token (RS256, validated via JWKS) — Phase 2.
+      3. LitPulse-issued legacy bridge token (HS256, secret =
+         ``LITPULSE_JWT_SECRET_KEY``) — Phase 1, kept during cutover.
 
-    The two token formats are distinguishable by signature — they share the
-    algorithm but use different secrets, so trying native first is cheap and
-    we never accidentally "trust" a LitPulse-shaped payload signed by the
-    Portal Engine secret.
+    Each token format is unambiguous by signature/algorithm. We try native
+    first because it's cheapest; the Identity path is consulted next because
+    Phase 2 is the going-forward standard; the LitPulse legacy bridge is the
+    fallback so existing sessions keep working until they expire naturally.
+
+    ``request`` is optional so the dependency can also be called directly in
+    unit tests; the Identity path needs the app's shared httpx client and is
+    skipped when no request context is available.
     """
     raw_token = token.credentials
     settings = get_settings()
+    http_client: httpx.AsyncClient | None = (
+        request.app.state.http_client if request is not None else None
+    )
 
     # 1. Native Portal Engine token.
     try:
@@ -385,10 +492,17 @@ async def get_current_user(
             raise AuthenticationError("User not found or deactivated.")
         return user
     except jwt.InvalidTokenError:
-        # Fall through to the LitPulse path; signature didn't match this secret.
-        pass
+        pass  # Try the next validator.
 
-    # 2. LitPulse-issued token (cross-service auth bridge).
+    # 2. Identity Service token (Phase 2). Needs the shared HTTP client for JWKS.
+    if http_client is not None:
+        identity_user = await _resolve_identity_token(
+            raw_token, user_repo, settings, http_client,
+        )
+        if identity_user is not None:
+            return identity_user
+
+    # 3. LitPulse legacy bridge token (Phase 1).
     litpulse_user = await _resolve_litpulse_token(raw_token, user_repo, settings)
     if litpulse_user is not None:
         return litpulse_user
@@ -397,6 +511,7 @@ async def get_current_user(
 
 
 async def get_current_user_optional(
+    request: Request,
     token: HTTPAuthorizationCredentials | None = Depends(oauth2_scheme_optional),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> User | None:
@@ -405,7 +520,9 @@ async def get_current_user_optional(
     if token is None:
         return None
     try:
-        return await get_current_user(token=token, user_repo=user_repo)
+        return await get_current_user(
+            request=request, token=token, user_repo=user_repo,
+        )
     except AuthenticationError as exc:
         logger.warning("optional_auth_failed", reason=exc.message)
         return None
